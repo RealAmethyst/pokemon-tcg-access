@@ -1,0 +1,107 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>PokemonTCGLiveAccessibility</AssemblyName>
+    <RootNamespace>PokemonTCGLiveAccessibility</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LavaGang.MelonLoader" Version="0.7.0" />
+    <PackageReference Include="Lib.Harmony" Version="2.3.6" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Unity engine modules -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameManagedDir)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.InputModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(GameManagedDir)\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Game assemblies -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(GameManagedDir)\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MatchLogic">
+      <HintPath>$(GameManagedDir)\MatchLogic.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="CardDatabase.DataAccess">
+      <HintPath>$(GameManagedDir)\CardDatabase.DataAccess.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RainierClientSDK">
+      <HintPath>$(GameManagedDir)\RainierClientSDK.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCILocalization">
+      <HintPath>$(GameManagedDir)\TPCILocalization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCILocalizationAPI">
+      <HintPath>$(GameManagedDir)\TPCILocalizationAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCI.Localization.Api">
+      <HintPath>$(GameManagedDir)\TPCI.Localization.Api.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCI.Localization.Impl">
+      <HintPath>$(GameManagedDir)\TPCI.Localization.Impl.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCIEventDispatch">
+      <HintPath>$(GameManagedDir)\TPCIEventDispatch.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCIEventDispatchAPI">
+      <HintPath>$(GameManagedDir)\TPCIEventDispatchAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <!-- Override on the command line: msbuild /p:GameDir="..." -->
+    <GameDir Condition="'$(GameDir)' == ''">C:\Users\Amethyst\The Pokémon Company International\Pokémon Trading Card Game Live</GameDir>
+    <GameManagedDir>$(GameDir)\Pokemon TCG Live_Data\Managed</GameManagedDir>
+    <GameMelonLoaderDir>$(GameDir)\MelonLoader</GameMelonLoaderDir>
+  </PropertyGroup>
+</Project>
