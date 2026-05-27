@@ -68,8 +68,8 @@ internal static class Prism
     [DllImport(Dll, CallingConvention = Cdecl, EntryPoint = "prism_shutdown")]
     public static extern void Shutdown(IntPtr ctx);
 
-    [DllImport(Dll, CallingConvention = Cdecl, EntryPoint = "prism_registry_acquire_best")]
-    public static extern IntPtr RegistryAcquireBest(IntPtr ctx);
+    [DllImport(Dll, CallingConvention = Cdecl, EntryPoint = "prism_registry_create_best")]
+    public static extern IntPtr RegistryCreateBest(IntPtr ctx);
 
     [DllImport(Dll, CallingConvention = Cdecl, EntryPoint = "prism_backend_free")]
     public static extern void BackendFree(IntPtr backend);

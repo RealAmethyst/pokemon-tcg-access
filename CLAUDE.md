@@ -1,0 +1,200 @@
+# Pokémon TCG Live — Accessibility Mod
+
+Private screen-reader accessibility mod for **Pokémon TCG Live** (Unity 6.3.5f2, Mono).
+
+## Project Goal
+Give blind / visually-impaired players the same gameplay experience as sighted players, including online matches. No cheating — just speech and keyboard access for everything the game already offers visually.
+
+## Status (initialised 2026-05-27)
+- **Phase 0 (foundation):** scaffold complete, builds clean, loads in game, speech works, window accessibility solved (NVDA can focus and OCR the game window).
+- **Phase 1 (front-of-house — title, language select, main menu, settings, login):** not started.
+- **Phase 2 (deck builder):** not started.
+- **Phase 3 (battle):** not started.
+- **Phase 4 (shop, quests, profile, tournaments, online plumbing):** not started.
+
+See `../research/QUESTIONS-001-initial-setup.md` for the locked-in design decisions.
+
+---
+
+## Repos & Paths
+
+### This Repo (mod source)
+- **Local:** `C:\Users\Amethyst\projects\Pokemon TCG live\mod`
+- **GitHub:** https://github.com/RealAmethyst/pokemon-tcg-access (private)
+- Single C# project: `PokemonTCGLiveAccessibility.csproj` (net472, SDK-style)
+
+### Research & Data (NOT in git, local only)
+- **Local:** `C:\Users\Amethyst\projects\Pokemon TCG live\research`
+- `research/decompiled/` — 60 game-specific DLLs decompiled with `ilspycmd` (~26 MB, 5,534 .cs files)
+- `research/architecture-notes.md` — first-pass architecture survey
+- `research/launching-the-game.md` — launch flags, window-focus workarounds, troubleshooting
+- `research/QUESTIONS-001-initial-setup.md` — locked-in design Q&A (carry over to future sessions for context)
+- `research/prism-source/` — clone of `https://github.com/ethindp/prism` for building `prism.dll`
+- `research/build-prism.bat` — rebuilds `prism.dll` via CMake under vcvars64
+- `research/decompile.sh` / `decompile.log` — bash script to redecompile all DLLs
+- `research/prism.h` — saved Prism C header for API reference
+
+### Game Install (ASCII-only path — see Gotchas)
+- `C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live`
+- Mods go in `<game>\Mods\`
+- `prism.dll` lives directly in `<game>\` next to `Pokemon TCG Live.exe`
+- MelonLoader's own files in `<game>\MelonLoader\`, log at `<game>\MelonLoader\Latest.log`
+- Loader config at `<game>\UserData\Loader.cfg` (we've set `hide_console = true`)
+
+---
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| Mod loader | MelonLoader 0.7.3 (Open-Beta, Mono support) |
+| Mod target framework | `net472` (Unity's Mono runtime) |
+| Patching | Harmony (`HarmonyLib.Harmony`, bundled by MelonLoader's `LavaGang.MelonLoader` NuGet) |
+| Speech | Prism (C, MPL-2.0) — built locally as `prism.dll`, P/Invoked directly |
+| Build | `dotnet build -c Release` (no extra tooling needed) |
+
+Why direct Prism P/Invoke and not the .NET Prismatoid binding? Prismatoid targets `net10.0` which won't load in Unity Mono. Direct P/Invoke avoids the cross-runtime barrier. The full Prism C API is ~30 functions; we bind only what we use in `Speech/Prism.cs`.
+
+---
+
+## Architecture / Hookpoints
+
+| Purpose | Hook target | File reference (in `research/decompiled`) |
+|---|---|---|
+| Universal text capture | `LocalizationManager.GetString` (postfix) | `TPCILocalization/TPCI/Localization/LocalizationManager.cs` |
+| Screen transitions | `MainMenuNavigation.GoToScreen` (postfix) | `TPCI.RainierClient/...` |
+| Bootstrap timing | `RainierManager.Awake` (postfix) | `TPCI.RainierClient/RainierManager.cs` |
+| Card data lookup | `CardDatabaseRepository.GetCardDataRow` (postfix) | `CardDatabase.DataAccess/.../CardDatabaseRepository.cs` |
+| Focus tracking | `EventSystem.current.currentSelectedGameObject` polling; also Unity's `Selectable` chain | uGUI standard |
+| Match lifecycle | `NetworkMatchController` static methods | `TPCI.RainierClient/NetworkMatchController.cs` |
+
+UI framework: pure uGUI (Canvas + RectTransform + TextMeshProUGUI). **No UI Toolkit.** Input: legacy `UnityEngine.Input` only — no new InputSystem package. Game is **mouse-primary**; no controller / keyboard navigation system exists, so we synthesize our own (see `Navigation/`).
+
+Full architecture survey: `../research/architecture-notes.md`.
+
+---
+
+## Source layout
+
+```
+mod/
+├── PokemonTCGLiveAccessibility.csproj   # net472, SDK-style
+├── PokemonTCGLiveAccessibility.sln
+├── Directory.Build.props                # $(GameDir) — override on cmd line if needed
+├── Main.cs                              # MelonMod entry, [MelonInfo], [MelonGame]
+├── Speech/
+│   ├── Prism.cs                         # P/Invoke bindings for prism.dll
+│   ├── SpeechEngine.cs                  # init / shutdown / Say
+│   └── Announce.cs                      # "item, description, X of Y" formatter
+├── Hooks/                               # all skeleton — bodies are TODO(phase-0)
+│   ├── LocalizationHook.cs              # → LocalizationManager.GetString
+│   ├── ScreenHook.cs                    # → MainMenuNavigation.GoToScreen
+│   └── BootstrapHook.cs                 # → RainierManager.Awake
+├── Navigation/
+│   ├── FocusManager.cs                  # synthetic keyboard focus state
+│   └── HoverableScanner.cs              # discover focusables via Selectable/IPointerClickHandler
+├── Input/
+│   └── KeyBindings.cs                   # arrow/tab/enter handling
+├── Util/
+│   ├── Log.cs                           # MelonLogger wrapper
+│   └── WindowFix.cs                     # WS_POPUP→overlapped + WndProc subclass for WM_GETOBJECT
+├── vendor/
+│   └── prism/prism.dll                  # gitignored; built copy of prism.dll for reference
+└── CLAUDE.md                            # you are here
+```
+
+---
+
+## Build & Deploy
+
+### Build
+```powershell
+dotnet build -c Release
+```
+Output: `bin\Release\PokemonTCGLiveAccessibility.dll`.
+
+### Deploy (one-shot)
+```powershell
+Copy-Item bin\Release\PokemonTCGLiveAccessibility.dll `
+  "C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live\Mods\PokemonTCGLiveAccessibility.dll" -Force
+```
+Game must be closed (Windows holds a file lock while loaded).
+
+### First-time install (already done)
+1. MelonLoader 0.7+ installed into the game folder via official installer.
+2. `prism.dll` placed in `<game>\` next to `Pokemon TCG Live.exe`. To rebuild: run `..\research\build-prism.bat` (uses vcvars64 + CMake).
+
+### Rebuild prism.dll
+```powershell
+..\research\build-prism.bat
+Copy-Item ..\research\prism-source\build\Release\prism.dll `
+  "C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live\prism.dll" -Force
+```
+
+---
+
+## Critical Gotchas (don't trip on these again)
+
+1. **Game install path must be ASCII-only.** MelonLoader's `plthook_open` fails on non-ASCII characters. Original install at `C:\Users\Amethyst\The Pokémon Company International\...` (with `é`) doesn't work. Current path uses plain `Pokemon`. See MelonLoader issue #978.
+
+2. **`[MelonGame]` attribute must match `<game>\Pokemon TCG Live_Data\app.info` exactly.** That file says `pokemon\nPokemon TCG Live` (lowercase dev, no accents). The marketing names ("The Pokémon Company International" / "Pokémon Trading Card Game Live") would make MelonLoader reject the mod as incompatible.
+
+3. **Prism init quirks.** Use `prism_registry_create_best`, not `acquire_best`. Treat `PRISM_ERROR_ALREADY_INITIALIZED` as a success result, not an error. Some backends (NVDA, JAWS via their RPC bridges) come pre-initialised from the registry. See `Speech/SpeechEngine.cs`.
+
+4. **Unity 6 suppresses `WM_GETOBJECT`.** Unity 6's WndProc actively returns nothing for accessibility queries, so screen readers see Unity windows as opaque. Fix is implemented in `Util/WindowFix.cs`: subclass Unity's WndProc via `SetWindowLongPtr`, route `WM_GETOBJECT` to `DefWindowProc` instead of the original Unity proc. Older Unity (Master Duel etc.) does not have this regression.
+
+5. **Console hidden.** `<game>\UserData\Loader.cfg` has `hide_console = true` — without this, the MelonLoader console steals alt-tab focus on launch.
+
+6. **`prism.dll` location matters.** Must be in `<game>\` (next to the exe), not in `<game>\Mods\`. P/Invoke resolves it relative to the executable's directory.
+
+7. **Don't use file-scoped namespace + `using HarmonyLib` together.** There's a top-level `Harmony` namespace that collides with `HarmonyLib.Harmony` when the using is in scope. Fully-qualify as `HarmonyLib.Harmony` in parameter types — see `Hooks/*Hook.cs`.
+
+---
+
+## How to Find Things in Decompiled Code
+
+```powershell
+# Search for a class / method name:
+rg "class LocalizationManager" ..\research\decompiled\TPCILocalization
+# Find files containing a string the game might display:
+rg "Select Language" ..\research\decompiled
+# Find Harmony patch targets by namespace:
+ls ..\research\decompiled\TPCI.RainierClient\TPCI\Rainier
+```
+All decompilation done with `ilspycmd` (in `C:\Users\Amethyst\.dotnet\tools\ilspycmd.exe`). Per-DLL folders are compilable projects (we won't compile them — they're for reference).
+
+---
+
+## Workflow Conventions (durable preferences)
+
+- **Designer / coder split.** Amethyst designs, Claude codes. Open design questions go in `mod/QUESTIONS.md` (then move to `../research/` once answered).
+- **Mod folder is the git repo.** `mod/` only contains code. `research/` is local-only (not in git), holds decompiled source, notes, archived questions, the Prism clone, build scripts.
+- **Speech format default:** `"<item name>[, <description>], <index> of <total>"` — single speech call per item. Shops/options screens are exceptions because they involve prices/values. Cards are their own domain (deferred to Phase 3).
+- **Keyboard focus discovery heuristic:** "if it's hover/click-interactive for a sighted player, it's focusable for us." Scan for `Selectable`, `IPointerClickHandler`, etc. — see `Navigation/HoverableScanner.cs`.
+- **No open-sourcing.** GitHub repo is private; used as a backup / rollback mechanism, not for distribution.
+- **Distribution:** Amethyst has a separate tool that packages mods as `<name>-vX.Y.Z-amm.zip` for the Amethyst Mod Manager. We don't worry about packaging here.
+
+---
+
+## What to do next
+
+**Immediate (Phase 0 polish):**
+- Verify WndProc subclass alone is sufficient — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar.
+- Optionally: defer the "loaded" speech until after the WndProc subclass installs, and call `NotifyWinEvent(EVENT_OBJECT_REORDER, ...)` so the screen reader re-queries the window immediately.
+
+**Phase 1 work (front-of-house):**
+1. Implement `Hooks/LocalizationHook.cs` — Harmony postfix on `LocalizationManager.GetString` capturing every resolved string with its resourceId.
+2. Implement `Hooks/ScreenHook.cs` — Harmony postfix on `MainMenuNavigation.GoToScreen`, announce the new screen name on transition.
+3. Wire `Hooks/BootstrapHook.cs` — patch `RainierManager.Awake` to install per-screen handlers once the singleton is alive.
+4. Build the first screen handler for **Select Language**, then **Title**, then **Main Menu**, then **Settings**.
+
+Refer to `../research/architecture-notes.md` for hook target line numbers and rationale.
+
+---
+
+## Memory & persistent notes
+
+Long-term durable knowledge for future Claude sessions lives at:
+`C:\Users\Amethyst\.claude\projects\C--Users-Amethyst-projects-Pokemon-TCG-live-mod\memory\MEMORY.md`
+
+That index points to per-topic memory files covering user preferences, project identity, design decisions, and gotchas. Keep it updated when something non-obvious happens.

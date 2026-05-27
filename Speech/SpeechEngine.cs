@@ -22,15 +22,15 @@ internal sealed class SpeechEngine
                 return;
             }
 
-            _backend = Prism.RegistryAcquireBest(_ctx);
+            _backend = Prism.RegistryCreateBest(_ctx);
             if (_backend == IntPtr.Zero)
             {
-                Log.Error("Prism.RegistryAcquireBest returned null — no screen reader detected");
+                Log.Error("Prism.RegistryCreateBest returned null — no backend available");
                 return;
             }
 
             var initErr = Prism.BackendInitialize(_backend);
-            if (initErr != Prism.PrismError.Ok)
+            if (initErr != Prism.PrismError.Ok && initErr != Prism.PrismError.AlreadyInitialized)
             {
                 Log.Error($"Prism backend init failed: {initErr} ({Prism.ErrorString(initErr)})");
                 return;

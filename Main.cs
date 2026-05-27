@@ -7,7 +7,7 @@ using PokemonTCGLiveAccessibility.Speech;
 using PokemonTCGLiveAccessibility.Util;
 
 [assembly: MelonInfo(typeof(Mod), BuildInfo.Name, BuildInfo.Version, BuildInfo.Author)]
-[assembly: MelonGame("The Pokémon Company International", "Pokémon Trading Card Game Live")]
+[assembly: MelonGame("pokemon", "Pokemon TCG Live")]
 
 namespace PokemonTCGLiveAccessibility;
 
@@ -23,6 +23,7 @@ public class Mod : MelonMod
     private SpeechEngine? _speech;
     private FocusManager? _focus;
     private KeyBindings? _keys;
+    private WindowFix? _windowFix;
 
     public override void OnInitializeMelon()
     {
@@ -34,6 +35,7 @@ public class Mod : MelonMod
 
         _focus = new FocusManager(_speech);
         _keys = new KeyBindings(_focus);
+        _windowFix = new WindowFix();
 
         LocalizationHook.Install(HarmonyInstance, _speech);
         ScreenHook.Install(HarmonyInstance, _speech, _focus);
@@ -42,6 +44,7 @@ public class Mod : MelonMod
 
     public override void OnUpdate()
     {
+        _windowFix?.Tick();
         _keys?.Tick();
         _focus?.Tick();
     }
