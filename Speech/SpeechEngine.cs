@@ -1,5 +1,6 @@
 using System;
 using PokemonTCGLiveAccessibility.Util;
+using UnityEngine;
 
 namespace PokemonTCGLiveAccessibility.Speech;
 
@@ -51,8 +52,14 @@ internal sealed class SpeechEngine
 
     public void Say(string text, bool interrupt)
     {
-        if (!Ready || string.IsNullOrEmpty(text)) return;
-        var err = Prism.BackendOutput(_backend, text, interrupt);
+        if (!Ready) return;
+        // Silent while the game window isn't focused. The user is presumably reading another
+        // window's content (browser login, IDE, etc.) and doesn't want game speech interleaved.
+        // On focus regain, Mod.OnUpdate asks the active handler to RespeakAll() so nothing is lost.
+        if (!Application.isFocused) return;
+        var processed = TextProcessor.Process(text);
+        if (string.IsNullOrEmpty(processed)) return;
+        var err = Prism.BackendOutput(_backend, processed!, interrupt);
         if (err != Prism.PrismError.Ok)
             Log.Warn($"Speak failed: {err} ({Prism.ErrorString(err)})");
     }

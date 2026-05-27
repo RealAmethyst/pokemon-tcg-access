@@ -34,8 +34,9 @@ See `../research/QUESTIONS-001-initial-setup.md` for the locked-in design decisi
 - `research/decompile.sh` / `decompile.log` — bash script to redecompile all DLLs
 - `research/prism.h` — saved Prism C header for API reference
 
-### Game Install (ASCII-only path — see Gotchas)
-- `C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live`
+### Game Install (via NTFS junction — see Gotchas #1)
+- Dev paths reference `C:\PokemonTCGLive` (junction → real install). The real install on disk is
+  at `C:\Users\Amethyst\The Pokemon Company International\Pokémon Trading Card Game Live\`.
 - Mods go in `<game>\Mods\`
 - `prism.dll` lives directly in `<game>\` next to `Pokemon TCG Live.exe`
 - MelonLoader's own files in `<game>\MelonLoader\`, log at `<game>\MelonLoader\Latest.log`
@@ -81,20 +82,19 @@ mod/
 ├── PokemonTCGLiveAccessibility.csproj   # net472, SDK-style
 ├── PokemonTCGLiveAccessibility.sln
 ├── Directory.Build.props                # $(GameDir) — override on cmd line if needed
-├── Main.cs                              # MelonMod entry, [MelonInfo], [MelonGame]
+├── Main.cs                              # MelonMod entry; wires SpeechEngine, ScreenRouter, hooks
 ├── Speech/
 │   ├── Prism.cs                         # P/Invoke bindings for prism.dll
 │   ├── SpeechEngine.cs                  # init / shutdown / Say
 │   └── Announce.cs                      # "item, description, X of Y" formatter
-├── Hooks/                               # all skeleton — bodies are TODO(phase-0)
-│   ├── LocalizationHook.cs              # → LocalizationManager.GetString
-│   ├── ScreenHook.cs                    # → MainMenuNavigation.GoToScreen
-│   └── BootstrapHook.cs                 # → RainierManager.Awake
+├── Hooks/
+│   └── LocalizationHook.cs              # Harmony postfix on LocalizationManager.GetString; loc cache
 ├── Navigation/
-│   ├── FocusManager.cs                  # synthetic keyboard focus state
-│   └── HoverableScanner.cs              # discover focusables via Selectable/IPointerClickHandler
-├── Input/
-│   └── KeyBindings.cs                   # arrow/tab/enter handling
+│   └── KeyboardNavigator.cs             # reusable kb nav: arrows/tab/enter → Selectable.Select + Button.onClick.Invoke
+├── Screens/
+│   ├── IScreenHandler.cs                # per-menu handler interface
+│   ├── ScreenRouter.cs                  # owns the active handler, ticks it
+│   └── LanguageSelectScreen.cs          # first concrete handler (LanguageSelect.Initialize patch)
 ├── Util/
 │   ├── Log.cs                           # MelonLogger wrapper
 │   └── WindowFix.cs                     # WS_POPUP→overlapped + WndProc subclass for WM_GETOBJECT
@@ -102,6 +102,8 @@ mod/
 │   └── prism/prism.dll                  # gitignored; built copy of prism.dll for reference
 └── CLAUDE.md                            # you are here
 ```
+
+Per-menu handlers live in `Screens/` and each one installs its own Harmony patch on whichever class actually drives that screen in the decompiled source. They share `KeyboardNavigator` for the universal "read arrow keys → Selectable.Select → Button.onClick" loop, since the game itself has zero keyboard input plumbing.
 
 ---
 
@@ -116,7 +118,7 @@ Output: `bin\Release\PokemonTCGLiveAccessibility.dll`.
 ### Deploy (one-shot)
 ```powershell
 Copy-Item bin\Release\PokemonTCGLiveAccessibility.dll `
-  "C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live\Mods\PokemonTCGLiveAccessibility.dll" -Force
+  "C:\PokemonTCGLive\Mods\PokemonTCGLiveAccessibility.dll" -Force
 ```
 Game must be closed (Windows holds a file lock while loaded).
 
@@ -128,14 +130,14 @@ Game must be closed (Windows holds a file lock while loaded).
 ```powershell
 ..\research\build-prism.bat
 Copy-Item ..\research\prism-source\build\Release\prism.dll `
-  "C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live\prism.dll" -Force
+  "C:\PokemonTCGLive\prism.dll" -Force
 ```
 
 ---
 
 ## Critical Gotchas (don't trip on these again)
 
-1. **Game install path must be ASCII-only.** MelonLoader's `plthook_open` fails on non-ASCII characters. Original install at `C:\Users\Amethyst\The Pokémon Company International\...` (with `é`) doesn't work. Current path uses plain `Pokemon`. See MelonLoader issue #978.
+1. **Game install path tug-of-war: PTC OAuth requires the registered install path, MelonLoader has Mono-runtime issues with non-ASCII paths.** The PTC launcher's true default install path is `C:\Users\<user>\The Pokémon Company International\Pokémon Trading Card Game Live\` — **both** folder segments contain `é`. On this dev machine the outer folder happens to be ASCII (`The Pokemon Company International`) because it was manually renamed before a game repair; that's why MelonLoader currently loads here. Most players will have the double-`é` default. Original failure (2026-05-27): MelonLoader's `plthook_open` failed on the double-`é` path (see [MelonLoader issue #978](https://github.com/LavaGang/MelonLoader/issues/978)). We then moved the install to a fully-ASCII path; that broke PTC OAuth because the URL scheme handler is registered against whatever path the PTC launcher installed to — moving the install means the OAuth callback fires a stale path. Resolution: keep the install at the PTC default path, install MelonLoader through an NTFS junction at an ASCII alias (`C:\PokemonTCGLive` → real install). Junction is the same physical directory, so OAuth keeps working. Full end-user procedure: `../research/end-user-setup.md`.
 
 2. **`[MelonGame]` attribute must match `<game>\Pokemon TCG Live_Data\app.info` exactly.** That file says `pokemon\nPokemon TCG Live` (lowercase dev, no accents). The marketing names ("The Pokémon Company International" / "Pokémon Trading Card Game Live") would make MelonLoader reject the mod as incompatible.
 
@@ -167,6 +169,7 @@ All decompilation done with `ilspycmd` (in `C:\Users\Amethyst\.dotnet\tools\ilsp
 
 ## Workflow Conventions (durable preferences)
 
+- **No workarounds. Use the game's own systems.** The decompiled code in `../research/decompiled/` is the definitive source of truth — every screen, button, focus model, and input path is already in there. Before writing any nav/focus/input logic, find what the game uses natively (uGUI `Selectable.navigation`, `EventSystem.SetSelectedGameObject`, `StandaloneInputModule`, `FocusedElement`, button `OnClick` UnityEvents, etc.) and hook *those*. Don't synthesize parallel systems just because the first guess didn't work — re-read the decompiled code until you find the right hook. Synthetic fallbacks (HoverableScanner-style) are only a last resort for screens where the game truly has nothing.
 - **Designer / coder split.** Amethyst designs, Claude codes. Open design questions go in `mod/QUESTIONS.md` (then move to `../research/` once answered).
 - **Mod folder is the git repo.** `mod/` only contains code. `research/` is local-only (not in git), holds decompiled source, notes, archived questions, the Prism clone, build scripts.
 - **Speech format default:** `"<item name>[, <description>], <index> of <total>"` — single speech call per item. Shops/options screens are exceptions because they involve prices/values. Cards are their own domain (deferred to Phase 3).

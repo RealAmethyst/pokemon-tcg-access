@@ -1,8 +1,7 @@
 using MelonLoader;
 using PokemonTCGLiveAccessibility;
 using PokemonTCGLiveAccessibility.Hooks;
-using PokemonTCGLiveAccessibility.Input;
-using PokemonTCGLiveAccessibility.Navigation;
+using PokemonTCGLiveAccessibility.Screens;
 using PokemonTCGLiveAccessibility.Speech;
 using PokemonTCGLiveAccessibility.Util;
 
@@ -21,9 +20,10 @@ public static class BuildInfo
 public class Mod : MelonMod
 {
     private SpeechEngine? _speech;
-    private FocusManager? _focus;
-    private KeyBindings? _keys;
     private WindowFix? _windowFix;
+    private ScreenRouter? _router;
+    private bool _wasFocused = true;
+    private string? _signatureAtFocusLoss;
 
     public override void OnInitializeMelon()
     {
@@ -33,20 +33,42 @@ public class Mod : MelonMod
         _speech = new SpeechEngine();
         _speech.Start();
 
-        _focus = new FocusManager(_speech);
-        _keys = new KeyBindings(_focus);
         _windowFix = new WindowFix();
+        _router = new ScreenRouter(_speech);
 
         LocalizationHook.Install(HarmonyInstance, _speech);
-        ScreenHook.Install(HarmonyInstance, _speech, _focus);
-        BootstrapHook.Install(HarmonyInstance, _speech, _focus);
+
+        LanguageSelectScreen.Install(HarmonyInstance, _router);
+        SimpleMessageScreen.Install(HarmonyInstance, _router);
     }
 
     public override void OnUpdate()
     {
         _windowFix?.Tick();
-        _keys?.Tick();
-        _focus?.Tick();
+        HandleFocusTransition();
+        _router?.Tick();
+    }
+
+    // Bridge: a screen may have activated / changed state while the user was on a browser
+    // window during PTC login etc. On focus regain ask the top handler to re-announce its
+    // full state — but only if the state actually changed while we were away. If the user
+    // just alt-tabbed to Discord and back without anything happening in the game, we stay quiet.
+    private void HandleFocusTransition()
+    {
+        var focused = UnityEngine.Application.isFocused;
+        if (focused == _wasFocused) return;
+        _wasFocused = focused;
+        if (focused)
+        {
+            var now = _router?.Active?.StateSignature();
+            if (now != null && now != _signatureAtFocusLoss)
+                _router!.Active!.RespeakAll();
+        }
+        else
+        {
+            _speech?.Stop();
+            _signatureAtFocusLoss = _router?.Active?.StateSignature();
+        }
     }
 
     public override void OnApplicationQuit()

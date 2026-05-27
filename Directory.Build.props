@@ -1,7 +1,10 @@
 <Project>
   <PropertyGroup>
     <!-- Override on the command line: msbuild /p:GameDir="..." -->
-    <GameDir Condition="'$(GameDir)' == ''">C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live</GameDir>
+    <!-- Junction at C:\PokemonTCGLive points to the real é install. Using the ASCII alias here
+         keeps MSBuild + MelonLoader bootstrap on ASCII paths; the actual files on disk live at
+         C:\Users\<user>\The Pokemon Company International\Pokémon Trading Card Game Live\. -->
+    <GameDir Condition="'$(GameDir)' == ''">C:\PokemonTCGLive</GameDir>
     <GameManagedDir>$(GameDir)\Pokemon TCG Live_Data\Managed</GameManagedDir>
     <GameMelonLoaderDir>$(GameDir)\MelonLoader</GameMelonLoaderDir>
   </PropertyGroup>
