@@ -19,8 +19,8 @@ Private project. Goal: parity with sighted players, including online matches.
 
 Requires:
 1. .NET SDK (any modern; the project targets `net472`)
-2. The game installed at the default path:
-   `C:\Users\Amethyst\The Pokémon Company International\Pokémon Trading Card Game Live`
+2. The game installed at an **ASCII-only path** (MelonLoader's `plthook_open` fails on non-ASCII paths — see MelonLoader issue #978). Default expected:
+   `C:\Users\Amethyst\The Pokemon Company International\Pokemon Trading Card Game Live`
    (override with `msbuild /p:GameDir="..."` if installed elsewhere)
 3. MelonLoader 0.7+ installed into the game folder (run the installer once)
 
