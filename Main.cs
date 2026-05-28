@@ -40,12 +40,20 @@ public class Mod : MelonMod
 
         LanguageSelectScreen.Install(HarmonyInstance, _router);
         SimpleMessageScreen.Install(HarmonyInstance, _router);
+        LoadingScreen.Install(HarmonyInstance, _router);
+        ConsentScreen.Install(HarmonyInstance, _router);
+        ModalContainerScreen.Install(HarmonyInstance, _router);
+        ProfessorTooltipScreen.Install(HarmonyInstance, _router);
+        DialogueScreen.Install(HarmonyInstance, _router);
+        HUBProfileScreen.Install(HarmonyInstance, _router);
     }
 
     public override void OnUpdate()
     {
         _windowFix?.Tick();
         HandleFocusTransition();
+        // Handlers that activate via async / coroutine-driven game state poll here each frame.
+        ConsentScreen.Poll();
         _router?.Tick();
     }
 

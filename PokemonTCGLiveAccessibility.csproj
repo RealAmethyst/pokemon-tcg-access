@@ -82,6 +82,10 @@
       <HintPath>$(GameManagedDir)\TPCI.RainierClient.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="TPCI.Shared.Singletons">
+      <HintPath>$(GameManagedDir)\TPCI.Shared.Singletons.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="TPCILocalization">
       <HintPath>$(GameManagedDir)\TPCILocalization.dll</HintPath>
       <Private>false</Private>

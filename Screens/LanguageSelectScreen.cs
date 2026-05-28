@@ -79,11 +79,13 @@ internal sealed class LanguageSelectScreen : IScreenHandler
             return;
         }
 
-        // Vertical-only list: up/down navigates the 7 languages; left/right and Tab are ignored.
+        _nav.SetItems(langButtons);
+        // Explicit override: visually a 2-column grid, but user prefers list behavior here —
+        // up/down through all 7 languages; left/right and Tab ignored. SetItems' auto-detect
+        // would have picked (vertical, horizontal) for a grid-ish bounding box.
         _nav.AllowVertical = true;
         _nav.AllowHorizontal = false;
         _nav.AllowTab = false;
-        _nav.SetItems(langButtons);
 
         // selectLanguageTitle is populated by Initialize from the startup-only loc table; just read what's rendered.
         var title = ReadTitleText(_ls) ?? Name;
