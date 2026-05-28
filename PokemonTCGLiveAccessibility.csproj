@@ -52,6 +52,10 @@
       <HintPath>$(GameManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Unity.TextMeshPro">
       <HintPath>$(GameManagedDir)\Unity.TextMeshPro.dll</HintPath>
       <Private>false</Private>
@@ -108,6 +112,18 @@
     </Reference>
     <Reference Include="TPCIEventDispatchAPI">
       <HintPath>$(GameManagedDir)\TPCIEventDispatchAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TPCIAnywhereCoroutine">
+      <HintPath>$(GameManagedDir)\TPCIAnywhereCoroutine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SharedLogicUtils">
+      <HintPath>$(GameManagedDir)\SharedLogicUtils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="EnhancedScrollerV2">
+      <HintPath>$(GameManagedDir)\EnhancedScrollerV2.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

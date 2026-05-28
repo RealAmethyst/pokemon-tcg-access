@@ -181,15 +181,36 @@ All decompilation done with `ilspycmd` (in `C:\Users\Amethyst\.dotnet\tools\ilsp
 
 ## What to do next
 
-**Immediate (Phase 0 polish):**
-- Verify WndProc subclass alone is sufficient — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar.
-- Optionally: defer the "loaded" speech until after the WndProc subclass installs, and call `NotifyWinEvent(EVENT_OBJECT_REORDER, ...)` so the screen reader re-queries the window immediately.
+**Phase 1 — front-of-house. Currently in: HUB Profile / avatar customization.**
 
-**Phase 1 work (front-of-house):**
-1. Implement `Hooks/LocalizationHook.cs` — Harmony postfix on `LocalizationManager.GetString` capturing every resolved string with its resourceId.
-2. Implement `Hooks/ScreenHook.cs` — Harmony postfix on `MainMenuNavigation.GoToScreen`, announce the new screen name on transition.
-3. Wire `Hooks/BootstrapHook.cs` — patch `RainierManager.Awake` to install per-screen handlers once the singleton is alive.
-4. Build the first screen handler for **Select Language**, then **Title**, then **Main Menu**, then **Settings**.
+The outer Profile screen and the inner avatar customization panel are largely functional. Both use the section-stack nav model (see `memory/feedback_section_escape_nav.md`):
+- Outer Profile: top tab strip ↕ Friends ↕ avatar grid ↕ catch-all (Customize/Stats/SwapAvatar)
+- Category panels: items section ↕ tabs section (when sub-tabs exist — Catchphrases, Pose)
+
+**Immediate next steps (where we left off 2026-05-28):**
+
+1. **Face / Eyes sub-tabs** in `AvatarCategoryScreen`. Same pattern as `HasIntroVictoryTabs` — anchor on `HUBProfileController._avatarEnhancedScroller`, walk parent chain, look for `ColoredEventTriggerToggle` named `"Face"` and `"Eyes"`. Add a `HasFaceEyesTabs` predicate and a `_faceToggle` / `_eyesToggle` pair. `EnterTabsSection` / `AnnounceTab` / `ActivateTab` already handle the abstraction; just extend the discovery and the tab-index ↔ category mapping.
+
+2. **Skin-tone strip** (and the analogous hair-color / glasses-color strips). Lives under `HUBProfileController._avatarGroupObjectsController` — its `Activate(category)` method swaps in the category-specific group. Find the active `Selectable` children inside the controller's hierarchy and add them as a third section above the items inside the relevant category panels (Face → skin tone, Hair → hair color, etc.).
+
+3. **Back button** as the topmost section in category panels. There's a "Back" button visible at the top-left of each panel; pressing Up from the tabs section should escape to it. We left a TODO comment in `TickTabs` for this. Find via `HUBProfileScreenController` hierarchy walk (likely a named child).
+
+4. **Remaining HUB screens** — once Profile is solid, repeat the pattern for the other top-tab destinations:
+   - `HUBHomeController` (HOME)
+   - `HUBDeckSelectController` (DECKS)
+   - `HUBShopController` (SHOP)
+   - `HUBExpansionChallengeScreenController` (BATTLE PASS)
+   - `HUBCardDexController` (CARD DEX)
+
+5. **Verify WndProc subclass alone is sufficient** — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar. Still pending from Phase 0.
+
+**Phase 1.5 — login / consent / language picker flow:**
+- `LanguageSelectScreen`, `ConsentScreen`, `LoadingScreen`, `DialogueScreen`, `SimpleMessageScreen`, `ModalContainerScreen`, `ProfessorTooltipScreen` are already implemented and working through the FTUE chain. Verify they still behave correctly after the recent group-name and filter changes.
+
+**Phase 2 onward** (later sessions):
+- Deck builder
+- Match / battle UI (the big one — battle is mouse-primary with no keyboard nav, board cards/hand cards aren't standard Selectables)
+- Shop, quests, online plumbing
 
 Refer to `../research/architecture-notes.md` for hook target line numbers and rationale.
 

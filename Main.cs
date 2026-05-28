@@ -37,6 +37,7 @@ public class Mod : MelonMod
         _router = new ScreenRouter(_speech);
 
         LocalizationHook.Install(HarmonyInstance, _speech);
+        FTUEHook.Install(HarmonyInstance);
 
         LanguageSelectScreen.Install(HarmonyInstance, _router);
         SimpleMessageScreen.Install(HarmonyInstance, _router);
@@ -46,6 +47,7 @@ public class Mod : MelonMod
         ProfessorTooltipScreen.Install(HarmonyInstance, _router);
         DialogueScreen.Install(HarmonyInstance, _router);
         HUBProfileScreen.Install(HarmonyInstance, _router);
+        AvatarCategoryScreen.Install(HarmonyInstance, _router);
     }
 
     public override void OnUpdate()
