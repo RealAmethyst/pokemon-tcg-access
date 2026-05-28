@@ -181,28 +181,67 @@ All decompilation done with `ilspycmd` (in `C:\Users\Amethyst\.dotnet\tools\ilsp
 
 ## What to do next
 
-**Phase 1 — front-of-house. Currently in: HUB Profile / avatar customization.**
+**Phase 1 — front-of-house. Avatar customization complete (2026-05-29). Next: remaining HUB screens.**
 
-The outer Profile screen and the inner avatar customization panel are largely functional. Both use the section-stack nav model (see `memory/feedback_section_escape_nav.md`):
+The outer Profile screen and every inner avatar customization category panel are now functional. Both use the section-stack nav model (see `memory/feedback_section_escape_nav.md`):
 - Outer Profile: top tab strip ↕ Friends ↕ avatar grid ↕ catch-all (Customize/Stats/SwapAvatar)
-- Category panels: items section ↕ tabs section (when sub-tabs exist — Catchphrases, Pose)
+- Category panels: Back ↕ Tabs ↕ Colors ↕ Slider ↕ Items, with each middle section present only when the panel has it (Intro/Victory tabs for Catchphrase + Anim; Face/Eyes tabs for Face; Frames/Lenses tabs for Glasses; skin/eye/hair color swatches for Face & Hair; hair hue slider for Hair; frames+lens sliders for Glasses).
 
-**Immediate next steps (where we left off 2026-05-28):**
+**Completed (this session, 2026-05-29):**
 
-1. **Face / Eyes sub-tabs** in `AvatarCategoryScreen`. Same pattern as `HasIntroVictoryTabs` — anchor on `HUBProfileController._avatarEnhancedScroller`, walk parent chain, look for `ColoredEventTriggerToggle` named `"Face"` and `"Eyes"`. Add a `HasFaceEyesTabs` predicate and a `_faceToggle` / `_eyesToggle` pair. `EnterTabsSection` / `AnnounceTab` / `ActivateTab` already handle the abstraction; just extend the discovery and the tab-index ↔ category mapping.
+1. **Face / Eyes sub-tabs** in `AvatarCategoryScreen` — **DONE**. Implementation differs from the
+   originally-sketched design because the game's Face/Eyes pair is structurally distinct from
+   Intro/Victory: it lives inside `AvatarGroupObjectsController._faceSelectorGameObject` (not
+   as siblings of `_avatarEnhancedScroller`), uses plain `Toggle` components, and activating
+   "Eyes" toggles the color group's visibility without calling `SelectCategory(Eyes)`. The
+   handler discovers the pair via the `_faceSelectorGameObject` anchor and re-announces
+   explicitly after Face/Eyes activation since `SelectCategory_Postfix` won't fire. See
+   [[project-avatar-panel-components]] for full details.
 
-2. **Skin-tone strip** (and the analogous hair-color / glasses-color strips). Lives under `HUBProfileController._avatarGroupObjectsController` — its `Activate(category)` method swaps in the category-specific group. Find the active `Selectable` children inside the controller's hierarchy and add them as a third section above the items inside the relevant category panels (Face → skin tone, Hair → hair color, etc.).
+2. **Skin-tone / eye-color strip nav for Face** — **DONE**. Added `Section.Colors` between
+   Tabs and Items in `AvatarCategoryScreen`. Discovery reads the currently-visible group
+   from `AvatarGroupObjectsController._colorGroupObjectDict` (whichever
+   `ColorGroupObjects._localGameObject.activeInHierarchy == true`) at section-entry time, so
+   swapping the Face/Eyes tab automatically picks up the new group's swatches. Activation
+   sets `swatch.isOn = true`, routing through the game's existing color-toggle handlers. See
+   [[feedback-color-section-nav]].
 
-3. **Back button** as the topmost section in category panels. There's a "Back" button visible at the top-left of each panel; pressing Up from the tabs section should escape to it. We left a TODO comment in `TickTabs` for this. Find via `HUBProfileScreenController` hierarchy walk (likely a named child).
+   **Hair color** (task #4) and **Glasses frames/lenses + sliders** (task #5) are still pending —
+   each has an extra widget (Hair has a hue slider; Glasses has frames/lenses sub-tabs plus
+   colour & alpha sliders) that needs a dedicated nav model.
 
-4. **Remaining HUB screens** — once Profile is solid, repeat the pattern for the other top-tab destinations:
+3. **Back button as topmost section** — **DONE**. Section.Back wired into the existing escape
+   chain (Items → Colors → Tabs → Back). Activation invokes
+   `AvatarGroupObjectsController._closeListButton.onClick`, which routes through `CloseList`
+   for the full save-and-tear-down flow. Important gotcha logged in
+   [[feedback-inactive-click-endpoints]]: that Button reference is normally inactive — it's a
+   click-handler endpoint, not the visible back arrow — so `BackAvailable` gates on non-null
+   only, not `isActiveAndEnabled`.
+
+4. **Hair color + hue slider** — **DONE**. Section.Slider added between Colors and Items in
+   the stack. Discovery reads `AvatarGroupObjectsController._colorHairSlider`; Left/Right
+   adjusts by 5% steps; the game's own onValueChanged (OnProcessHairColorSlider) applies
+   the color, so Enter is a no-op. See [[feedback-slider-section-nav]]. Section escape
+   refactored to a single ordered-stack helper (`s_orderedSections` + `EscapeUp`/`EscapeDown`)
+   so future categories just need their `HasX`/`Discover` pair.
+
+5. **Glasses (frames/lenses tabs + 3 sliders)** — **DONE**. Adds Frames/Lenses sub-tab
+   pair (same shape as Face/Eyes) via a generic `DiscoverPlainTogglePair` helper.
+   Section.Slider extended to a list of sliders + index — Up/Down moves between stacked
+   sliders within the section before escaping. Frames tab surfaces 1 slider (Frames
+   colour); Lenses tab surfaces 2 (Lens colour + Lens transparency). DiscoverSlider runs
+   on section entry, so flipping the tab repoints the slider list automatically.
+
+**Pending (next pick-up):**
+
+6. **Remaining HUB screens** — Profile is solid; repeat the pattern for the other top-tab destinations. Each is its own handler patching the controller's activate/deactivate:
    - `HUBHomeController` (HOME)
    - `HUBDeckSelectController` (DECKS)
    - `HUBShopController` (SHOP)
    - `HUBExpansionChallengeScreenController` (BATTLE PASS)
    - `HUBCardDexController` (CARD DEX)
 
-5. **Verify WndProc subclass alone is sufficient** — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar. Still pending from Phase 0.
+7. **Verify WndProc subclass alone is sufficient** — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar. Still pending from Phase 0.
 
 **Phase 1.5 — login / consent / language picker flow:**
 - `LanguageSelectScreen`, `ConsentScreen`, `LoadingScreen`, `DialogueScreen`, `SimpleMessageScreen`, `ModalContainerScreen`, `ProfessorTooltipScreen` are already implemented and working through the FTUE chain. Verify they still behave correctly after the recent group-name and filter changes.
