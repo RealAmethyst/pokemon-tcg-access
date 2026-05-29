@@ -66,6 +66,23 @@ internal sealed class ScreenRouter
         handler.OnEnter();
     }
 
+    // Activate a background/base handler so it sits BELOW the current top handler instead of over it.
+    // Used when a base screen "starts" while a modal is already showing — e.g. Battle's StartGame fires
+    // while a tutorial Dialogue bubble is up: the dialogue must stay the focused, only-tickable thing so
+    // the player can advance it, and the base becomes active only when the modal closes/pops.
+    public void ActivateBackground(IScreenHandler handler)
+    {
+        if (_stack.Contains(handler)) return;
+        if (_stack.Count == 0) { Activate(handler); return; }
+        var arr = _stack.ToArray();        // top-first
+        _stack.Clear();
+        for (int i = arr.Length - 1; i >= 1; i--) _stack.Push(arr[i]);   // everything below the top, bottom-first
+        _stack.Push(handler);              // the new background handler, just below the top
+        _stack.Push(arr[0]);               // restore the top (modal) — it keeps focus
+        Log.Info($"Screen → {handler.Name} (below {arr[0].Name})");
+        handler.OnEnter();                 // sets up its state; any announce queues behind the modal's speech
+    }
+
     public void Deactivate(IScreenHandler handler)
     {
         // Only pop the top — refuse silent reordering of the stack.

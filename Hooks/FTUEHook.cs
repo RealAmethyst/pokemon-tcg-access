@@ -74,6 +74,21 @@ internal static class FTUEHook
         }
     }
 
+    // True while the FTUE is TEACHING the attack/ability overlay (FTUEAttackOverlayIndicator). That
+    // state only points coaching arrows at elements or focuses the close button and waits for you to
+    // CLOSE the overlay — none of its branches ever execute an attack. So the player must not be able
+    // to invoke an attack/ability/retreat during it: the game doesn't guard the op (it assumes you
+    // follow the coaching), so doing so desyncs and freezes the tutorial. The player reads + backs out.
+    public static bool AttackOverlayTeachingActive
+    {
+        get
+        {
+            for (int i = 0; i < _trackedStates.Count; i++)
+                if (_trackedStates[i] is FTUEAttackOverlayIndicator) return true;
+            return false;
+        }
+    }
+
     private static bool IsPassiveWaitState(object state)
     {
         // The "FTUE is now waiting for the user to do something" states. The animator parks

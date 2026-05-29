@@ -156,6 +156,35 @@ internal static class BattleBoardReader
         return lines;
     }
 
+    // Cost / damage / rules-text for the action with this (localized) name on the card — so the
+    // attack/ability menu can speak WHAT an action does after its name. Empty when there's no match
+    // (e.g. Retreat, which isn't a card action). Matches by localized name (exact, then a contains
+    // fallback to tolerate a leading type tag).
+    internal static string ActionDetail(Card3D c, string actionName)
+    {
+        var row = c?.cardDataRow;
+        if (row == null || string.IsNullOrEmpty(actionName)) return "";
+        string want = actionName.Trim();
+        CardDataRow.ActionInfo? match = null;
+        foreach (var a in row.GetActionInfos())
+        {
+            if (a == null || string.IsNullOrEmpty(a.LocalizedName)) continue;
+            string ln = a.LocalizedName.Trim();
+            if (ln == want) { match = a; break; }
+            if (match == null && (want.Contains(ln) || ln.Contains(want))) match = a;
+        }
+        if (match == null) return "";
+
+        var head = new List<string>();
+        string cost = EnergyCostWords(match.Cost);
+        if (cost.Length > 0) head.Add(cost);
+        if (!string.IsNullOrEmpty(match.Damage)) head.Add($"{match.Damage} damage");
+        string stats = string.Join(", ", head);
+        string desc = match.LocalizedDescription ?? "";
+        if (stats.Length > 0 && desc.Length > 0) return $"{stats}. {desc}";
+        return stats.Length > 0 ? stats : desc;
+    }
+
     // "name, type" — e.g. "Charmander, Basic Pokémon", "Ultra Ball, Item", "Lillie's Determination, Supporter".
     internal static string CardNameWithType(Card3D c)
     {

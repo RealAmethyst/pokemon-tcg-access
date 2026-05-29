@@ -31,7 +31,7 @@ internal sealed class BattleScreen : IScreenHandler
     private bool _active;
     private MatchManager.MatchState _phase = MatchManager.MatchState.None;
 
-    private enum Mode { Nav, ActionMenu, CardView }
+    private enum Mode { Nav, ActionMenu, CardView, ConfirmPlay }
     private Mode _mode = Mode.Nav;
 
     // Card-view reading state (locked on one card, reading its printed lines).
@@ -60,8 +60,25 @@ internal sealed class BattleScreen : IScreenHandler
     private bool _holding;
     private Card3D? _heldCard;
 
+    // No-target play state (Item / Trainer / Supporter): the game's targeting handler still runs,
+    // but the receiver is always the local pending slot, so we auto-commit without any field nav.
+    private bool _autoPlaying;
+    private int _autoPlayTicks;
+
+    // A no-target card awaiting the player's "Use X?" confirmation (Enter plays, Backspace cancels).
+    private Card3D? _confirmCard;
+
+    // True while a LOCAL selection request is open (prize / discard / search / choose-active / …),
+    // tracked off the game's own SelectionStateChanged event. We block turn-ending and new actions
+    // while it's set so we can't desync the match — even for selection families we don't drive yet.
+    private bool _localSelecting;
+    private MatchManager? _selSubManager;   // manager we've hooked SelectionStateChanged on
+
     // Tutorial guidance: the entityID of the FTUE-spotlighted card we last announced.
     private string _ftueCardId = "";
+
+    // True once we've announced the screen-space message bar's "Done" button (setup confirm etc.).
+    private bool _doneBarShown;
 
     public string Name => "Battle";
 
@@ -94,7 +111,24 @@ internal sealed class BattleScreen : IScreenHandler
         else
             Log.Warn("BattleScreen: MatchManager.LoadEndBattleScreen not found — end-of-match announcement disabled");
 
+        // Coin flips (starting flip, attack effects) only show their result visually — speak it. FlipCoin
+        // returns the per-coin result (isHeads) and fires once per coin in a multi-flip.
+        var flipCoin = AccessTools.Method(typeof(CoinFlipOverlay), "FlipCoin");
+        if (flipCoin != null)
+            harmony.Patch(flipCoin, postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(BattleScreen), nameof(FlipCoin_Postfix))));
+        else
+            Log.Warn("BattleScreen: CoinFlipOverlay.FlipCoin not found — coin flip results won't be announced");
+
         Log.Info("BattleScreen installed");
+    }
+
+    // Announce each coin's result. Queued (interrupt:false) so a multi-flip reads "Heads. Tails. …" in
+    // order without cutting off, and so it never clips the prompt/turn speech around it.
+    private static void FlipCoin_Postfix(bool __result)
+    {
+        if (_instance == null) return;
+        _instance._router.Speech.Say($"Coin flip: {(__result ? "Heads" : "Tails")}", interrupt: false);
     }
 
     private static void StartGame_Postfix(MatchManager __instance)
@@ -102,11 +136,36 @@ internal sealed class BattleScreen : IScreenHandler
         if (_instance == null) return;
         _instance._manager = __instance;
         _instance._phase = __instance.currentState;
+        _instance.HookSelectionState(__instance);
         if (!_instance._active)
         {
             _instance._active = true;
-            _instance._router.Activate(_instance);
+            // A tutorial Dialogue bubble can already be showing as the battle starts (the final FTUE
+            // battle does this). It must stay the focused, only-interactable thing so the player can
+            // advance it — so slot Battle in BELOW it; Battle becomes active when the dialogue closes.
+            // (Normally StartGame fires with FTUEBattleIntro on top, and Battle correctly goes over it.)
+            if (_instance._router.Active is DialogueScreen)
+                _instance._router.ActivateBackground(_instance);
+            else
+                _instance._router.Activate(_instance);
         }
+    }
+
+    // Subscribe (once per match) to the game's selection-state signal. InputRequestOperation raises
+    // this (LOCAL, true) before opening ANY local selection overlay and (LOCAL, false) when it
+    // resolves, so it's a reliable "a choice is pending" flag across every selection family.
+    private void HookSelectionState(MatchManager mgr)
+    {
+        if (_selSubManager == mgr) return;
+        _selSubManager = mgr;
+        _localSelecting = false;
+        try { mgr.AddSelectionStateChangedCallback(OnSelectionStateChanged); }
+        catch (Exception ex) { Log.Error($"BattleScreen: SelectionStateChanged subscribe threw: {ex.Message}"); }
+    }
+
+    private void OnSelectionStateChanged(PlayerID who, bool selecting)
+    {
+        if (who == PlayerID.LOCAL) _localSelecting = selecting;
     }
 
     private static void SetState_Postfix(MatchManager __instance, MatchManager.MatchState newState)
@@ -133,6 +192,8 @@ internal sealed class BattleScreen : IScreenHandler
         _router.SetCurrentTitle(this, "Battle");
         _mode = Mode.Nav;
         _holding = false;
+        _autoPlaying = false;
+        _confirmCard = null;
         _ftueCardId = "";
         var phase = PhaseText(_phase);
         var opening = phase == null ? "Battle started" : $"Battle started. {phase}";
@@ -141,8 +202,15 @@ internal sealed class BattleScreen : IScreenHandler
 
     public void OnResume()
     {
-        // A child handler popped. Don't re-announce the phase (children push/pop after every
-        // tutorial coaching line). The genuine turn announcement comes only from SetState_Postfix.
+        // A child handler popped (e.g. a decision prompt resolved). Don't re-announce the phase
+        // (children push/pop after every tutorial coaching line — the genuine turn announcement
+        // comes only from SetState_Postfix). But DO two things the resolved prompt may have changed:
+        //  • Re-arm tutorial guidance so the next Tick re-announces what the FTUE now wants (a forced
+        //    card step often becomes active right after a search/discard resolves).
+        //  • Re-read the focused zone — playing a card / resolving a search mutates the board, so the
+        //    cached card list is stale (this is the "left/right shows old hand cards" report).
+        _ftueCardId = "";
+        RefreshZoneCards();
     }
 
     public void OnExit() { /* preserve _manager across pause — Tick checks Unity-null */ }
@@ -168,6 +236,8 @@ internal sealed class BattleScreen : IScreenHandler
         bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
         if (_mode == Mode.CardView) { TickCardView(); return; }
         if (_mode == Mode.ActionMenu) { TickActionMenu(); return; }
+        if (_mode == Mode.ConfirmPlay) { TickConfirmPlay(); return; }   // "Use X?" — Enter plays, Backspace cancels
+        if (_autoPlaying) { TickAutoPlay(); return; }   // committing a no-target play — field nav locked out
         if (!_holding) TutorialGuidanceTick();   // keep the player on the tutorial's spotlighted card
         TickNav(shift);
         if (_holding) RefreshHeldChosen();   // keep the placement loop aimed at the current focus
@@ -184,6 +254,15 @@ internal sealed class BattleScreen : IScreenHandler
 
         // While holding a picked-up card, Backspace cancels the drag and returns it to hand.
         if (_holding && Input.GetKeyDown(KeyCode.Backspace)) { CancelPickup(); return; }
+
+        // A "Done" / confirm button on the screen-space message bar (e.g. confirm your starting
+        // Pokémon at setup) — announce it once when it appears, and press it with TAB (NOT Enter, so
+        // Enter is still free to pick up / place more Bench Pokémon before you confirm). Reading the
+        // board with the zone/arrow keys also still works.
+        bool doneAvailable = MessageBarDoneAvailable();
+        if (doneAvailable) { if (!_doneBarShown) { _doneBarShown = true; AnnounceDoneBar(); } }
+        else _doneBarShown = false;
+        if (doneAvailable && Input.GetKeyDown(KeyCode.Tab)) { PressMessageBarDone(); return; }
 
         // Zone jump keys (HS "look at" style). Shift = opponent's equivalent where it exists.
         if (Input.GetKeyDown(KeyCode.A)) { FocusZone(shift ? BattleBoardReader.Zone.OppActive : BattleBoardReader.Zone.MyActive); return; }
@@ -233,6 +312,16 @@ internal sealed class BattleScreen : IScreenHandler
 
     private string CardLabel(int i) =>
         $"{BattleBoardReader.CardNameWithType(_zoneCards![i])}, {i + 1} of {_zoneCards.Count}";
+
+    // Re-read the current browsable zone's cards in place (board may have changed while a prompt was
+    // up, or after a play). Keeps the cursor on a valid index; no speech — navigation reads fresh.
+    private void RefreshZoneCards()
+    {
+        if (_manager == null || _zoneCards == null || BattleBoardReader.IsCountOnly(_zone)) return;
+        _zoneCards = BattleBoardReader.GetCards(_manager, _zone);
+        _card = _zoneCards.Count == 0 ? 0 : Mathf.Clamp(_card, 0, _zoneCards.Count - 1);
+        _line = -1;
+    }
 
     private void MoveCard(int delta)
     {
@@ -290,6 +379,10 @@ internal sealed class BattleScreen : IScreenHandler
     {
         if (_manager == null) return;
         string s = PhaseText(_phase) ?? "Battle";
+        // Surface the tutorial objective on demand — gives a reliable "what does it want me to do?"
+        // answer when the FTUE is mid-step (the T key the player already uses for status).
+        var ftueCard = FtueFocusedCard();
+        if (ftueCard != null) s += ". " + TutorialWantsText(ftueCard);
         s += $". You have {BattleBoardReader.GetCount(BattleBoardReader.Zone.MyPrize)} prizes left, " +
              $"opponent {BattleBoardReader.GetCount(BattleBoardReader.Zone.OppPrize)}.";
         var myActive = BattleBoardReader.GetCards(_manager, BattleBoardReader.Zone.MyActive).FirstOrDefault();
@@ -303,7 +396,80 @@ internal sealed class BattleScreen : IScreenHandler
     {
         if (_manager == null) return;
         if (!_manager.IsMyTurn) { _router.Speech.Say("Not your turn", interrupt: true); return; }
-        MatchUserOperations.EndTurn("", false);   // "ended turn" + the turn change come from the log / phase
+
+        // A local selection is open (a card effect is asking you to choose) — ending the turn now
+        // would desync the match. The game blocks it; so do we.
+        if (_localSelecting) { _router.Speech.Say("Finish the current selection first", interrupt: true); return; }
+
+        // Tutorial forced-card step: FTUECardIndicator sets FTUEMatchManager.focusedCard and loops
+        // `while (focusedCard != null)` waiting for THAT card to be played — but it never blocks the
+        // end-turn button and canEndTurn stays true, so ending turn here strands the FTUE coroutine
+        // and freezes the match. Redirect to the wanted card instead (the native FTUE signal).
+        var ftueCard = FtueFocusedCard();
+        if (ftueCard != null)
+        { _router.Speech.Say(TutorialWantsText(ftueCard) + ". Do that before ending your turn", interrupt: true); return; }
+
+        // Defer to the game's OWN end-turn gate rather than rolling our own: canEndTurn (the match-rules
+        // check, recomputed by UpdateEndTurn) plus the real End Turn button's interactable state — the
+        // FTUE and turn-processing phases Block() that button during forced / non-idle moments. This is
+        // what froze before: the bare op skipped both gates and sent end-turn mid-selection.
+        var info = NetworkMatchController.currentMatchInfo;
+        bool canEnd = info != null && info.UpdateEndTurn();
+        if (!canEnd || IsEndTurnButtonBlocked())
+        { _router.Speech.Say("You can't end your turn right now", interrupt: true); return; }
+
+        MatchUserOperations.EndTurn("", false);   // the same op the real button sends; result via log / phase
+    }
+
+    // Is the real End Turn button non-clickable right now? Two independent flags gate it, and a
+    // sighted player can't click it if EITHER is set, so neither may we:
+    //  • button.enabled  — the FTUE's BlockAll() → ForceSetButtons(false) → ToggleButton(false) sets
+    //    this false during EVERY forced tutorial step (this is the bug that froze us: we only checked
+    //    interactable before, which stays true here).
+    //  • button.interactable (== !isBlocking) — turn-processing / FTUE Block(key) sets this false.
+    // Conservative: if we can't find the button, don't block (canEndTurn still gates).
+    private bool IsEndTurnButtonBlocked()
+    {
+        try
+        {
+            var btn = _manager?.MatchInfoSidebar?.EndTurnButton;
+            var t = btn?.EndButtonTransform;
+            var uiBtn = t != null ? t.GetComponent<UnityEngine.UI.Button>() : null;
+            return uiBtn != null && (!uiBtn.enabled || !uiBtn.interactable);
+        }
+        catch (Exception ex) { Log.Error($"BattleScreen: end-turn button read threw: {ex.Message}"); return false; }
+    }
+
+    // The screen-space message bar's "Done" / confirm button (set-up confirm, "press Done to continue"
+    // moments). It's shown when the game wants a confirm; Enter presses it. CentralMessageBar.doneButton
+    // is only active when a Done action is wired, so activeInHierarchy is the "is there a Done to press".
+    private bool MessageBarDoneAvailable()
+    {
+        try
+        {
+            var t = _manager?.MessageBarScreenSpace?.DoneButtonTransform;
+            return t != null && t.gameObject.activeInHierarchy;
+        }
+        catch { return false; }
+    }
+
+    private void AnnounceDoneBar()
+    {
+        string msg = _manager?.MessageBarScreenSpace?.CurrText?.Trim() ?? "";
+        _router.Speech.Say(msg.Length > 0 ? $"{msg}. Press Tab for Done." : "Press Tab for Done.", interrupt: true);
+    }
+
+    // Invoke the real Done button's click — the same as a sighted player tapping it (confirms setup, etc.).
+    private void PressMessageBarDone()
+    {
+        try
+        {
+            var t = _manager?.MessageBarScreenSpace?.DoneButtonTransform;
+            var btn = t != null ? t.GetComponent<UnityEngine.UI.Button>() : null;
+            if (btn != null && btn.isActiveAndEnabled) { btn.onClick.Invoke(); _router.Speech.Say("Done", interrupt: true); }
+            else _router.Speech.Say("Can't confirm right now", interrupt: true);
+        }
+        catch (Exception ex) { Log.Error($"BattleScreen: Done press threw: {ex.Message}"); }
     }
 
     // Toggle the game's enlarged card viewer for the focused card. This drives the same inspection
@@ -383,30 +549,41 @@ internal sealed class BattleScreen : IScreenHandler
 
     private void OpenActionMenu()
     {
+        // While the game is waiting on a local selection, starting a new action would desync — block it.
+        if (_localSelecting)
+        { _router.Speech.Say("Finish the current selection first", interrupt: true); return; }
         if (_zoneCards == null || _card < 0 || _card >= _zoneCards.Count)
         { _router.Speech.Say("Nothing to act on", interrupt: true); return; }
 
         var card = _zoneCards[_card];
         if (card == null) return;
 
-        // Tutorial guard: only let the player ACT on the spotlighted card — redirect onto it
-        // otherwise, so you can't deviate from the scripted step and get the tutorial stuck.
-        var ftueCard = FtueFocusedCard();
-        if (ftueCard != null && card.entityID != ftueCard.entityID)
+        // Tutorial guard: only act on cards the tutorial currently PERMITS. DoesFTUEPermitCardTargetability
+        // is the game's own rule — TRUE in free play (the guided part is over and you play freely to win),
+        // TRUE for the spotlighted card during a forced step, FALSE otherwise (wrong card, or a step that
+        // hasn't armed yet). This blocks the "I attacked before the tutorial allowed it" freeze WITHOUT
+        // the false "tutorial isn't ready" during a free turn (the old blockInputs+focusedCard guard hit
+        // that because blockInputs stays set under free play). Normal (non-FTUE) matches never block.
+        if (!FtuePermitsCard(card))
         {
-            // Block the wrong action with a hint, but leave the player's focus where it is.
-            _router.Speech.Say($"The tutorial wants {BattleBoardReader.CardName(ftueCard)}", interrupt: true);
+            var ftueCard = FtueFocusedCard();
+            _router.Speech.Say(ftueCard != null ? TutorialWantsText(ftueCard) + " first"
+                                                : "The tutorial isn't ready for that yet", interrupt: true);
             return;
         }
 
         bool myTurn = _manager != null && _manager.CanPerformNewActions;
+        // The Setup phase ("Drag a Basic Pokémon to your Active Spot") is NOT LocalTurn, so
+        // CanPerformNewActions is false — yet you must be able to place your starting Pokémon then.
+        // Hand placement is allowed during setup too; in-play actions (attack/ability/retreat) are not.
+        bool canPlace = myTurn || (_manager != null && _manager.IsSetupPhase);
 
         // Route by the ZONE you navigated into, matching what you pressed to get here:
         //  • Your hand → play the card through the game's native placement (pick up → target →
         //    drop). Evolving is "play the evolution from your hand", so it lives on THIS path —
         //    pressing Enter on the board Pokémon opens its attack menu, not evolve.
         //  • Your active / bench → open that Pokémon's real attack / ability / retreat menu.
-        if (_zone == BattleBoardReader.Zone.MyHand && myTurn)
+        if (_zone == BattleBoardReader.Zone.MyHand && canPlace)
         {
             StartPickup(card);
             return;
@@ -428,7 +605,13 @@ internal sealed class BattleScreen : IScreenHandler
 
         _mode = Mode.ActionMenu;
         _actionIdx = 0;
-        _router.Speech.Say($"Actions for {BattleBoardReader.CardName(card)}. {ActionLabel(0)}", interrupt: true);
+        // If the FTUE is teaching the attack overlay, it just wants you to look and back out — opening
+        // it satisfied the coach; say so and make clear actions are read-only here (TickActionMenu blocks
+        // invoking them). Otherwise the normal action prompt.
+        if (overlayCard && FTUEHook.AttackOverlayTeachingActive)
+            _router.Speech.Say($"Attack menu for {BattleBoardReader.CardName(card)}. The tutorial is just showing you this — read with arrows, Backspace to go back. {ActionLabel(0)}", interrupt: true);
+        else
+            _router.Speech.Say($"Actions for {BattleBoardReader.CardName(card)}. {ActionLabel(0)}", interrupt: true);
     }
 
     private void TryOpenAttackOverlay(Card3D card)
@@ -479,6 +662,14 @@ internal sealed class BattleScreen : IScreenHandler
         }
         if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
         {
+            // The FTUE is only TEACHING the attack overlay right now (FTUEAttackOverlayIndicator) — it
+            // never executes an attack and the game doesn't guard the op, so invoking one would freeze
+            // the tutorial. Refuse and point the player at backing out (which satisfies the coach).
+            if (FTUEHook.AttackOverlayTeachingActive)
+            {
+                _router.Speech.Say("The tutorial is just showing you this menu. Press Backspace to go back.", interrupt: true);
+                return;
+            }
             var action = _actions[_actionIdx];
             if (!action.Usable)
             {
@@ -505,9 +696,9 @@ internal sealed class BattleScreen : IScreenHandler
 
         if (where == PlayerPos.HAND)
         {
-            // Hand cards are played through the game's native targeting flow (StartPlacement),
-            // invoked directly from OpenActionMenu — never via direct ops here. (Trainers/Supporters
-            // that "use" rather than place onto the board aren't wired through yet.)
+            // Hand cards are played through the game's native targeting flow, invoked directly from
+            // OpenActionMenu (StartPickup → hold-and-drop for target cards, or the no-target
+            // auto-play for Item/Trainer/Supporter) — never via direct ops or this action menu.
             return list;
         }
         if (where == PlayerPos.ACTIVE || where == PlayerPos.BENCH)
@@ -522,9 +713,9 @@ internal sealed class BattleScreen : IScreenHandler
                 info.activeUsableActions.Where(a => a != null).Select(a => a.actionGuid));
 
             if (overlay.AttackOptions != null)
-                foreach (var opt in overlay.AttackOptions) AddOverlayOption(list, opt, "Attack", usableGuids);
+                foreach (var opt in overlay.AttackOptions) AddOverlayOption(list, opt, "Attack", usableGuids, card);
             if (overlay.AbilityOptions != null)
-                foreach (var opt in overlay.AbilityOptions) AddOverlayOption(list, opt, "Use ability", usableGuids);
+                foreach (var opt in overlay.AbilityOptions) AddOverlayOption(list, opt, "Use ability", usableGuids, card);
 
             var retreat = overlay.RetreatOption;
             if (retreat != null)
@@ -542,26 +733,29 @@ internal sealed class BattleScreen : IScreenHandler
         return list;
     }
 
-    // Wrap one real overlay option as a menu entry whose Invoke is the option's own click.
-    private void AddOverlayOption(List<BattleAction> list, CardActionOption opt, string prefix, HashSet<string> usableGuids)
+    // Wrap one real overlay option as a menu entry whose Invoke is the option's own click. The label
+    // reads "<prefix>: <name>, <cost/damage + rules text>" so the player hears WHAT the attack/ability
+    // does (important for the abilities tutorial) before the "X of Y" index.
+    private void AddOverlayOption(List<BattleAction> list, CardActionOption opt, string prefix, HashSet<string> usableGuids, Card3D card)
     {
         if (opt == null) return;
         var action = opt.MatchAction;
         string nm = action != null && !string.IsNullOrEmpty(action.actionName) ? action.actionName : prefix;
         bool ok = action != null && usableGuids.Contains(action.actionGuid);
-        list.Add(new BattleAction
-        {
-            Label = $"{prefix}: {nm}" + (ok ? "" : ", unavailable"),
-            Usable = ok,
-            Invoke = () => opt.OnClick(),
-        });
+        string detail = BattleBoardReader.ActionDetail(card, nm);
+        string label = $"{prefix}: {nm}";
+        if (detail.Length > 0) label += $", {detail}";
+        if (!ok) label += ", unavailable";
+        list.Add(new BattleAction { Label = label, Usable = ok, Invoke = () => opt.OnClick() });
     }
 
-    // ---- Native hand-card placement: "hold and drop" via the board navigation ----
-    // Enter on a hand card picks it up through the game's CardTargetingHandler ("enters the drag").
-    // You then navigate the board normally (A / B / arrows) and press Enter on the destination to
-    // drop it — attach/evolve onto the focused Pokémon, or play to the focused zone. Backspace
-    // cancels. No separate target menu: the field shortcuts ARE the targeting.
+    // ---- Native hand-card placement via the board navigation ----
+    // Enter on a hand card runs it through the game's CardTargetingHandler. Cards that need a board
+    // TARGET — Pokémon, Energy, Tool, Stadium — "hold and drop": pick up here, navigate the board
+    // normally (A / B / arrows), then press Enter on the destination to drop — attach/evolve onto
+    // the focused Pokémon, or play to the focused zone; Backspace cancels. Cards with NO board target
+    // — Item / Trainer / Supporter — play immediately to the pending slot (no drag, no field nav);
+    // see the no-target branch below. No separate target menu: the field shortcuts ARE the targeting.
 
     private void StartPickup(Card3D card)
     {
@@ -570,6 +764,25 @@ internal sealed class BattleScreen : IScreenHandler
         if (info.placeableBoardPos.Count == 0 && info.attachableEntities.Count == 0 && info.activeUsableActions.Count == 0)
         { _router.Speech.Say($"You can't play {BattleBoardReader.CardName(card)} right now", interrupt: true); return; }
 
+        // Does this card need the player to choose a board target? Pokémon / Energy / Tool / Stadium
+        // do (a Pokémon to attach or evolve onto, or a zone to place into) — mirrors the game's
+        // CardHasAttachableEntities / CardHasPlaceableBoardPositions purposes. Item / Trainer /
+        // Supporter do not — they have only activeUsableActions and resolve to the fixed pending slot
+        // (CardHasUsableActions → UseCard), so there's nothing to drag to.
+        bool needsTarget = info.placeableBoardPos.Count > 0 || info.attachableEntities.Count > 0;
+        if (!needsTarget)
+        {
+            // No board target → no drag, no field nav. Confirm in place: "Use X?" — Enter plays it,
+            // Backspace cancels (TickConfirmPlay). The actual play runs in BeginNoTargetPlay. We don't
+            // touch the targeting handler until confirmed, so cancelling leaves nothing to clean up.
+            _confirmCard = card;
+            _mode = Mode.ConfirmPlay;
+            _router.Speech.Say($"Use {BattleBoardReader.CardName(card)}?", interrupt: true);
+            return;
+        }
+
+        // Target card: pick it up through the game's targeting handler and enter the navigate-and-drop
+        // hold (Backspace cancels; Enter on the destination drops).
         _manager.ApplyIdleStatePlacementContext();
         if (!_manager.TargetingHandler.IsCardTargetable(card))
         { _router.Speech.Say($"Can't play {BattleBoardReader.CardName(card)} now", interrupt: true); return; }
@@ -581,6 +794,52 @@ internal sealed class BattleScreen : IScreenHandler
         _holding = true;
         _heldCard = card;
         _router.Speech.Say($"Holding {BattleBoardReader.CardName(card)}", interrupt: true);
+    }
+
+    // Confirmed a no-target card → run it through the game's targeting handler aimed at the pending
+    // slot and auto-commit over the next couple frames (TickAutoPlay). No _holding, so the field stays
+    // un-navigable. Driving the real targeting handler (not a bare UseCard) keeps FTUE coaching and any
+    // play confirmations firing.
+    private void BeginNoTargetPlay(Card3D card)
+    {
+        _mode = Mode.Nav;
+        if (_manager == null) return;
+        _manager.ApplyIdleStatePlacementContext();
+        if (!_manager.TargetingHandler.IsCardTargetable(card))
+        { _router.Speech.Say($"Can't play {BattleBoardReader.CardName(card)} now", interrupt: true); return; }
+        _placeInit.Reset();
+        if (!_manager.TargetingHandler.TryTargetCard(card, _placeInit))
+        { _router.Speech.Say("Couldn't play that card", interrupt: true); return; }
+        _heldCard = card;
+        _autoPlaying = true;
+        _autoPlayTicks = 0;
+        _placeInit.SetChosen(PendingReceiver());
+    }
+
+    // "Use X?" confirmation for a no-target card. Enter plays it, Backspace/Escape backs out without
+    // playing. All other keys are ignored — it's a simple yes/no in place, no field navigation.
+    private void TickConfirmPlay()
+    {
+        if (_manager == null) { _mode = Mode.Nav; _confirmCard = null; return; }
+        if (!Application.isFocused) return;
+
+        if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+        {
+            var card = _confirmCard;
+            _confirmCard = null;
+            if (card != null) BeginNoTargetPlay(card);
+            else _mode = Mode.Nav;
+            return;
+        }
+        if (Input.GetKeyDown(KeyCode.Backspace) || Input.GetKeyDown(KeyCode.Escape))
+        {
+            _confirmCard = null;
+            _mode = Mode.Nav;
+            // Re-orient on the hand card (we never navigated away) without playing it.
+            if (_zoneCards != null && _card >= 0 && _card < _zoneCards.Count)
+                _router.Speech.Say(CardLabel(_card), interrupt: true);
+            return;
+        }
     }
 
     // Resolve the current drop target from where the player is focused: the focused Pokémon for
@@ -644,6 +903,41 @@ internal sealed class BattleScreen : IScreenHandler
         _router.Speech.Say(held != null ? $"Cancelled {BattleBoardReader.CardName(held)}" : "Cancelled", interrupt: true);
     }
 
+    // No-target play (Item / Trainer / Supporter): drive the game's targeting handler to drop the
+    // card onto the local pending slot, which fires UseCard — the same path a sighted player's drop
+    // takes. The placement loop commits to whatever receiver it saw "imminent" the frame BEFORE
+    // Commit flips true, so we keep the pending slot chosen and only raise Commit once it's been the
+    // imminent receiver for a frame (>= 2 ticks). Runs instead of TickNav, so no field navigation.
+    private void TickAutoPlay()
+    {
+        var recv = PendingReceiver();
+        if (_heldCard == null || _manager == null || recv == null) { CancelAutoPlay(); return; }
+        _placeInit.SetChosen(recv);
+        if (++_autoPlayTicks >= 2)
+        {
+            _placeInit.Commit = true;   // pending slot has been imminent ≥1 frame → commits next frame
+            _autoPlaying = false;
+            _heldCard = null;
+            Log.Info("BattleScreen: no-target play committed");   // result narrated by the battle log
+        }
+    }
+
+    private void CancelAutoPlay()
+    {
+        try { _manager?.TargetingHandler.ClearTarget(); }
+        catch (Exception ex) { Log.Error($"BattleScreen: auto-play ClearTarget threw: {ex.Message}"); }
+        _placeInit.Reset();
+        var held = _heldCard;
+        _autoPlaying = false;
+        _heldCard = null;
+        if (held != null) _router.Speech.Say($"Couldn't play {BattleBoardReader.CardName(held)}", interrupt: true);
+    }
+
+    // The local "pending" slot owner — the receiver a no-target card drops onto (CardHasUsableActions
+    // → UseCard). Same fallback receiver ComputeDropTarget resolves for activeUsableActions cards.
+    private ICardPlacementReceiver? PendingReceiver() =>
+        _manager != null && _manager.GetOwnerForBoardPos(Board.GetBoardPos(PlayerPos.PENDING, PlayerID.LOCAL)) is ICardPlacementReceiver p ? p : null;
+
     private BoardPos? ZoneToBoardPos(BattleBoardReader.Zone z) => z switch
     {
         BattleBoardReader.Zone.MyActive => Board.GetBoardPos(PlayerPos.ACTIVE, PlayerID.LOCAL),
@@ -661,6 +955,29 @@ internal sealed class BattleScreen : IScreenHandler
         return m == null ? null : m.focusedCard;
     }
 
+    // Does the FTUE permit acting on this card right now? Uses the game's OWN rule
+    // (DoesFTUEPermitCardTargetability): true outside the FTUE, true in free play, true for the
+    // spotlighted card during a forced step; false for a non-spotlighted card or a not-yet-armed step.
+    // Replaces the old blockInputs check, which wrongly blocked during free play (blockInputs lingers).
+    private static System.Reflection.MethodInfo? _ftuePermitMethod;
+    private bool FtuePermitsCard(Card3D card)
+    {
+        if (!FTUEHook.FtueIsRunning) return true;
+        var m = FTUEMatchManager.Instance;
+        if (m == null) return true;
+        try
+        {
+            // DoesFTUEPermitCardTargetability is private — reflect it (cached). It's the game's exact
+            // rule: free play → true; spotlighted card (not blockDrag) → true; else false.
+            if (_ftuePermitMethod == null)
+                _ftuePermitMethod = typeof(FTUEMatchManager).GetMethod("DoesFTUEPermitCardTargetability",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (_ftuePermitMethod == null) return true;
+            return (bool)_ftuePermitMethod.Invoke(m, new object[] { card });
+        }
+        catch { return true; }
+    }
+
     // On each new coaching step (the FTUE spotlights a different card), announce which card it wants
     // and where — WITHOUT moving the player's focus (jumping the cursor is disorienting). Fires only
     // when the spotlight changes; navigating between steps stays entirely up to the player.
@@ -670,9 +987,16 @@ internal sealed class BattleScreen : IScreenHandler
         if (ftue == null) { _ftueCardId = ""; return; }
         if (ftue.entityID == _ftueCardId) return;
         _ftueCardId = ftue.entityID;
+        _router.Speech.Say(TutorialWantsText(ftue), interrupt: false);
+    }
+
+    // Unified "Tutorial wants <card>, in <zone>" phrasing — shared by the spotlight announce, the
+    // wrong-card action guard, and the end-turn block so the player always hears the same objective.
+    private string TutorialWantsText(Card3D ftue)
+    {
         var zone = ZoneOfCard(ftue);
-        string where = zone != null ? ", " + BattleBoardReader.ZoneName(zone.Value) : "";
-        _router.Speech.Say($"Tutorial wants {BattleBoardReader.CardName(ftue)}{where}", interrupt: false);
+        string where = zone != null ? $", in {BattleBoardReader.ZoneName(zone.Value)}" : "";
+        return $"Tutorial wants {BattleBoardReader.CardName(ftue)}{where}";
     }
 
     private BattleBoardReader.Zone? ZoneOfCard(Card3D c)
