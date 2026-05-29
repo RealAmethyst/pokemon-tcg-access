@@ -234,14 +234,33 @@ The outer Profile screen and every inner avatar customization category panel are
 
 **Pending (next pick-up):**
 
-6. **Remaining HUB screens** — Profile is solid; repeat the pattern for the other top-tab destinations. Each is its own handler patching the controller's activate/deactivate:
+6. **FTUE tutorial battle intro overlay** — **DONE**. Hooks `FTUEManager.ChangeBattleText`
+   (activate / refresh) + `FTUEManager.CloseBattleCanvas` (deactivate). Reads header
+   ("BATTLE X OUT OF Y") + description from `FTUEManagerParts.battleCountText.CurrentText`
+   / `battleText.CurrentText`. Three buttons (PLAY / SKIP THIS BATTLE / SKIP ALL BATTLES)
+   navigated by Up/Down arrows in reading order — explicitly vertical-only, Tab disabled
+   per [[feedback-arrows-over-tab]]. Enter routes through each button's onClick
+   (PlayBattle / SkipThisBattle / SkipAllBattles).
+
+7. **Battle — major focus for next session.** Phase 3 begins. The actual in-battle UI is
+   the largest unhandled surface in the game: board zones (active, bench, prizes, hand,
+   deck, discard), card detail / inspection, action selection (attack, retreat, play
+   item, evolve), turn flow, opponent status. Battle is mouse-primary; board cards and
+   hand cards aren't standard Selectables — needs new abstractions on top of the
+   existing screen-handler model. Will likely involve patching `NetworkMatchController`
+   or whatever drives match state, plus a board-zone nav model distinct from menus.
+   Start by surveying `TPCI.RainierClient` for the match controller + card prefab
+   structure before writing any handler.
+
+8. **Remaining HUB screens** — HOME, DECKS, SHOP, BATTLE PASS, CARD DEX. Same handler
+   pattern as Profile. Lower priority than battle but still needed for full HUB coverage:
    - `HUBHomeController` (HOME)
    - `HUBDeckSelectController` (DECKS)
    - `HUBShopController` (SHOP)
    - `HUBExpansionChallengeScreenController` (BATTLE PASS)
    - `HUBCardDexController` (CARD DEX)
 
-7. **Verify WndProc subclass alone is sufficient** — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar. Still pending from Phase 0.
+9. **Verify WndProc subclass alone is sufficient** — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar. Still pending from Phase 0.
 
 **Phase 1.5 — login / consent / language picker flow:**
 - `LanguageSelectScreen`, `ConsentScreen`, `LoadingScreen`, `DialogueScreen`, `SimpleMessageScreen`, `ModalContainerScreen`, `ProfessorTooltipScreen` are already implemented and working through the FTUE chain. Verify they still behave correctly after the recent group-name and filter changes.

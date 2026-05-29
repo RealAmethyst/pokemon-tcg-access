@@ -48,6 +48,7 @@ public class Mod : MelonMod
         DialogueScreen.Install(HarmonyInstance, _router);
         HUBProfileScreen.Install(HarmonyInstance, _router);
         AvatarCategoryScreen.Install(HarmonyInstance, _router);
+        FTUEBattleIntroScreen.Install(HarmonyInstance, _router);
     }
 
     public override void OnUpdate()
