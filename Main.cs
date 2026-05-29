@@ -37,6 +37,7 @@ public class Mod : MelonMod
         _router = new ScreenRouter(_speech);
 
         LocalizationHook.Install(HarmonyInstance, _speech);
+        BattleLogHook.Install(HarmonyInstance, _speech);
         FTUEHook.Install(HarmonyInstance);
 
         LanguageSelectScreen.Install(HarmonyInstance, _router);
@@ -49,6 +50,8 @@ public class Mod : MelonMod
         HUBProfileScreen.Install(HarmonyInstance, _router);
         AvatarCategoryScreen.Install(HarmonyInstance, _router);
         FTUEBattleIntroScreen.Install(HarmonyInstance, _router);
+        BattleScreen.Install(HarmonyInstance, _router);
+        BattlePromptScreen.Install(HarmonyInstance, _router);
     }
 
     public override void OnUpdate()
