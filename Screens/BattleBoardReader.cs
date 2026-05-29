@@ -73,7 +73,38 @@ internal static class BattleBoardReader
         var (pp, pid) = Map(z);
         var owner = mgr.GetOwnerForBoardPos(Board.GetBoardPos(pp, pid));
         if (owner == null) return new List<Card3D>();
+        // The local hand STACKS identical cards (same cardDataRow.ArchetypeID) into one HandCardSlot,
+        // shown as a single pile with a count badge — and only the slot's TOP card is exposed for play
+        // (GetCardsAccessibleForTargeting = slot top-cards, what the placement evaluator keys on). So we
+        // browse the hand by SLOT (one entry per pile), matching exactly what a sighted player sees and
+        // can click — instead of GetOwnedCards (every individual card), which listed buried duplicates
+        // as separate, un-targetable entries. HandStackCount adds the "N copies" to the spoken label.
+        if (z == Zone.MyHand && owner is HandController hand)
+            return hand.GetCardsAccessibleForTargeting().Where(c => c != null).ToList();
         return owner.GetOwnedCards().Where(c => c != null).ToList();
+    }
+
+    // EVERY card in the local hand (each copy, including duplicates stacked behind a pile's top card) —
+    // for resolving a prompt option's card to read its lines, where the option may reference a buried
+    // copy that GetCards(MyHand) (slot top-cards only) wouldn't return.
+    internal static List<Card3D> GetHandCardsAll(MatchManager mgr)
+    {
+        if (mgr == null) return new List<Card3D>();
+        var owner = mgr.GetOwnerForBoardPos(Board.GetBoardPos(PlayerPos.HAND, PlayerID.LOCAL));
+        return owner == null ? new List<Card3D>() : owner.GetOwnedCards().Where(c => c != null).ToList();
+    }
+
+    // How many cards sit in the hand pile (HandCardSlot) this card belongs to — i.e. the count badge a
+    // sighted player sees on a stack of duplicates. 1 when it's a lone card or not a hand card.
+    internal static int HandStackCount(MatchManager mgr, Card3D card)
+    {
+        if (card == null || mgr == null) return 1;
+        var owner = mgr.GetOwnerForBoardPos(Board.GetBoardPos(PlayerPos.HAND, PlayerID.LOCAL));
+        if (owner is HandController hand)
+            foreach (var slot in hand.HandSlots)
+                if (slot != null && slot.DoesSlotContainCard(card))
+                    return slot.CardsInSlot.Count();
+        return 1;
     }
 
     // Logical count — safe for hidden piles (identities not revealed, just the number).

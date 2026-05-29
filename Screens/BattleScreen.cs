@@ -73,6 +73,7 @@ internal sealed class BattleScreen : IScreenHandler
     // while it's set so we can't desync the match — even for selection families we don't drive yet.
     private bool _localSelecting;
     private MatchManager? _selSubManager;   // manager we've hooked SelectionStateChanged on
+    private HandController? _handSub;        // local hand we've hooked OnCardAdded/OnCardRemoved on
 
     // Tutorial guidance: the entityID of the FTUE-spotlighted card we last announced.
     private string _ftueCardId = "";
@@ -137,6 +138,7 @@ internal sealed class BattleScreen : IScreenHandler
         _instance._manager = __instance;
         _instance._phase = __instance.currentState;
         _instance.HookSelectionState(__instance);
+        _instance.HookHandChanges(__instance);
         if (!_instance._active)
         {
             _instance._active = true;
@@ -168,6 +170,58 @@ internal sealed class BattleScreen : IScreenHandler
         if (who == PlayerID.LOCAL) _localSelecting = selecting;
     }
 
+    // Subscribe to the LOCAL hand's own add/remove events (HandController.OnCardAdded/OnCardRemoved,
+    // fired from ProcessCardGainedResult / ProcessCardRemovalResult). This is the game's native
+    // "your hand changed" signal — it lets us (1) announce draws the battle log doesn't cover (your
+    // per-turn / effect draws are private, so they never appear there), and (2) keep the focused hand
+    // list live so a drawn card shows up and a played/attached card stops being navigable while you're
+    // still standing in the hand (re-entering the zone already re-reads; this covers staying put).
+    private void HookHandChanges(MatchManager mgr)
+    {
+        HandController? hand = null;
+        try { hand = mgr.board?.GetPlayer(PlayerID.LOCAL)?.hand; } catch (Exception ex) { Log.Warn($"BattleScreen: hand lookup threw: {ex.Message}"); }
+        if (ReferenceEquals(hand, _handSub)) return;
+        UnhookHandChanges();
+        _handSub = hand;
+        if (_handSub != null)
+        {
+            try { _handSub.OnCardAdded += OnHandCardAdded; _handSub.OnCardRemoved += OnHandCardRemoved; }
+            catch (Exception ex) { Log.Error($"BattleScreen: hand subscribe threw: {ex.Message}"); }
+        }
+    }
+
+    private void UnhookHandChanges()
+    {
+        if (_handSub == null) return;
+        try { _handSub.OnCardAdded -= OnHandCardAdded; _handSub.OnCardRemoved -= OnHandCardRemoved; } catch { }
+        _handSub = null;
+    }
+
+    private void OnHandCardAdded(Card3D card)
+    {
+        try
+        {
+            if (card != null)
+            {
+                // Your own hand identity is always knowable — read the name directly rather than via
+                // CardName (which would say "face-down card" if IsPublic hasn't flipped yet mid-draw).
+                var nm = card.cardDataRow?.LocalizedCardName;
+                if (string.IsNullOrEmpty(nm)) nm = card.cardInfo?.cardName;
+                _router.Speech.Say(string.IsNullOrEmpty(nm) ? "Drew a card" : $"Drew {nm}", interrupt: false);
+            }
+            if (_active && _zone == BattleBoardReader.Zone.MyHand) RefreshZoneCards();   // appended card now navigable
+        }
+        catch (Exception ex) { Log.Error($"BattleScreen.OnHandCardAdded threw: {ex.Message}"); }
+    }
+
+    private void OnHandCardRemoved(Card3D card)
+    {
+        // A card left the hand (played / attached / discarded). If we're standing in the hand, drop it
+        // from the live list so it can't be navigated to or targeted as a phantom ("Can't play X now").
+        try { if (_active && _zone == BattleBoardReader.Zone.MyHand) RefreshZoneCards(); }
+        catch (Exception ex) { Log.Error($"BattleScreen.OnHandCardRemoved threw: {ex.Message}"); }
+    }
+
     private static void SetState_Postfix(MatchManager __instance, MatchManager.MatchState newState)
     {
         if (_instance == null || !_instance._active || _instance._manager != __instance) return;
@@ -184,6 +238,7 @@ internal sealed class BattleScreen : IScreenHandler
         _instance._router.Speech.Say("Battle ended", interrupt: false);
         _instance._active = false;
         _instance._router.Deactivate(_instance);
+        _instance.UnhookHandChanges();
         _instance._manager = null;
     }
 
@@ -310,8 +365,18 @@ internal sealed class BattleScreen : IScreenHandler
         _router.Speech.Say($"{zoneName}. {CardLabel(0)}", interrupt: true);
     }
 
-    private string CardLabel(int i) =>
-        $"{BattleBoardReader.CardNameWithType(_zoneCards![i])}, {i + 1} of {_zoneCards.Count}";
+    private string CardLabel(int i)
+    {
+        var card = _zoneCards![i];
+        string name = BattleBoardReader.CardNameWithType(card);
+        // In the hand, a pile of identical cards reads as one entry — speak its count like the badge.
+        if (_zone == BattleBoardReader.Zone.MyHand)
+        {
+            int n = BattleBoardReader.HandStackCount(_manager!, card);
+            if (n > 1) name += $", {n} copies";
+        }
+        return $"{name}, {i + 1} of {_zoneCards.Count}";
+    }
 
     // Re-read the current browsable zone's cards in place (board may have changed while a prompt was
     // up, or after a play). Keeps the cursor on a valid index; no speech — navigation reads fresh.
@@ -549,6 +614,7 @@ internal sealed class BattleScreen : IScreenHandler
 
     private void OpenActionMenu()
     {
+        Log.Info($"OpenActionMenu entry: zone={_zone} card={_card}/{_zoneCards?.Count ?? -1} localSel={_localSelecting} holding={_holding} mode={_mode}");
         // While the game is waiting on a local selection, starting a new action would desync — block it.
         if (_localSelecting)
         { _router.Speech.Say("Finish the current selection first", interrupt: true); return; }
@@ -567,6 +633,7 @@ internal sealed class BattleScreen : IScreenHandler
         if (!FtuePermitsCard(card))
         {
             var ftueCard = FtueFocusedCard();
+            Log.Info($"OpenActionMenu FTUE-blocked '{BattleBoardReader.CardName(card)}' (spotlight={(ftueCard != null ? BattleBoardReader.CardName(ftueCard) : "none")}): {PlayDiag(card)}");
             _router.Speech.Say(ftueCard != null ? TutorialWantsText(ftueCard) + " first"
                                                 : "The tutorial isn't ready for that yet", interrupt: true);
             return;
@@ -598,6 +665,7 @@ internal sealed class BattleScreen : IScreenHandler
         _actions = BuildActions(card);
         if (_actions.Count == 0)
         {
+            Log.Info($"OpenActionMenu no actions '{BattleBoardReader.CardName(card)}' zone={_zone} overlayCard={overlayCard} canPlace={canPlace}: {PlayDiag(card)}");
             if (overlayCard) TryCloseAttackOverlay();
             _router.Speech.Say($"No actions for {BattleBoardReader.CardName(card)}", interrupt: true);
             return;
@@ -709,14 +777,13 @@ internal sealed class BattleScreen : IScreenHandler
             var overlay = _manager.attackOverlay;
             if (overlay == null || !overlay.isOpen) return list;   // overlay must be open (Show ran)
 
-            var usableGuids = new HashSet<string>(
-                info.activeUsableActions.Where(a => a != null).Select(a => a.actionGuid));
-
             if (overlay.AttackOptions != null)
-                foreach (var opt in overlay.AttackOptions) AddOverlayOption(list, opt, "Attack", usableGuids, card);
+                foreach (var opt in overlay.AttackOptions) AddOverlayOption(list, opt, "Attack", card);
             if (overlay.AbilityOptions != null)
-                foreach (var opt in overlay.AbilityOptions) AddOverlayOption(list, opt, "Use ability", usableGuids, card);
+                foreach (var opt in overlay.AbilityOptions) AddOverlayOption(list, opt, "Use ability", card);
 
+            // Retreat: gate on the game's own authoritative canRetreat flag (the overlay's own
+            // RetreatClicked checks the same), clean "Retreat" label (no card-action detail/name).
             var retreat = overlay.RetreatOption;
             if (retreat != null)
             {
@@ -736,17 +803,39 @@ internal sealed class BattleScreen : IScreenHandler
     // Wrap one real overlay option as a menu entry whose Invoke is the option's own click. The label
     // reads "<prefix>: <name>, <cost/damage + rules text>" so the player hears WHAT the attack/ability
     // does (important for the abilities tutorial) before the "X of Y" index.
-    private void AddOverlayOption(List<BattleAction> list, CardActionOption opt, string prefix, HashSet<string> usableGuids, Card3D card)
+    //
+    // Usability comes from the option's OWN button.interactable — the exact state the game greys out
+    // and that the mouse path respects. Crucially, the overlay computes that (CanUseAttack/CanUseAbility)
+    // as activeUsableActions + CanPerformNewActions + !IsOperationProcessing AND the FTUE per-action
+    // spotlight (card.attackFocused/abilityFocused): during a tutorial step that highlights ONE action,
+    // only that one is interactable. A separate activeUsableActions cross-ref (the old approach) misses
+    // the spotlight, so it would let the player fire a non-highlighted action and freeze the tutorial.
+    // OnClick() does NOT self-gate (it always fires), so this gate is what stops an unusable invoke.
+    private void AddOverlayOption(List<BattleAction> list, CardActionOption opt, string prefix, Card3D card)
     {
         if (opt == null) return;
         var action = opt.MatchAction;
         string nm = action != null && !string.IsNullOrEmpty(action.actionName) ? action.actionName : prefix;
-        bool ok = action != null && usableGuids.Contains(action.actionGuid);
+        bool ok = OptionUsable(opt);
         string detail = BattleBoardReader.ActionDetail(card, nm);
         string label = $"{prefix}: {nm}";
         if (detail.Length > 0) label += $", {detail}";
         if (!ok) label += ", unavailable";
         list.Add(new BattleAction { Label = label, Usable = ok, Invoke = () => opt.OnClick() });
+    }
+
+    // The game's own "can the player click this option" state: the option button's interactable flag
+    // (= _canInteractDelegate() && _isActionUsable, i.e. IsMyTurn && CanUse). This is exactly what the
+    // mouse path obeys, so we obey it too rather than re-deriving usability ourselves.
+    private static bool OptionUsable(CardActionOption opt)
+    {
+        try
+        {
+            var t = opt?.ButtonTransform;
+            var btn = t != null ? t.GetComponent<UnityEngine.UI.Button>() : null;
+            return btn != null && btn.interactable;
+        }
+        catch { return false; }
     }
 
     // ---- Native hand-card placement via the board navigation ----
@@ -762,7 +851,20 @@ internal sealed class BattleScreen : IScreenHandler
         var info = card.cardInfo;
         if (info == null || _manager == null) { _router.Speech.Say("Can't play this", interrupt: true); return; }
         if (info.placeableBoardPos.Count == 0 && info.attachableEntities.Count == 0 && info.activeUsableActions.Count == 0)
-        { _router.Speech.Say($"You can't play {BattleBoardReader.CardName(card)} right now", interrupt: true); return; }
+        {
+            Log.Info($"StartPickup blocked (no legal play) '{BattleBoardReader.CardName(card)}': {PlayDiag(card)}");
+            _router.Speech.Say($"You can't play {BattleBoardReader.CardName(card)} right now", interrupt: true); return;
+        }
+
+        // Act on the instance the targeting evaluator actually keys on (the hand sender's), not our
+        // owner-list instance — see ResolveHandTargetingInstance. Fall back to our own if the hand
+        // sender doesn't list it (shouldn't happen for a hand card, but keep the play path alive).
+        var resolved = ResolveHandTargetingInstance(info.entityID);
+        var targetCard = resolved ?? card;
+        if (resolved == null)
+            Log.Info($"StartPickup: '{BattleBoardReader.CardName(card)}' (eid={info.entityID}) NOT in hand sender's accessible cards — using owner-list instance");
+        else if (!ReferenceEquals(resolved, card))
+            Log.Info($"StartPickup: '{BattleBoardReader.CardName(card)}' owner-list instance differed from hand-sender instance — using sender's");
 
         // Does this card need the player to choose a board target? Pokémon / Energy / Tool / Stadium
         // do (a Pokémon to attach or evolve onto, or a zone to place into) — mirrors the game's
@@ -775,25 +877,27 @@ internal sealed class BattleScreen : IScreenHandler
             // No board target → no drag, no field nav. Confirm in place: "Use X?" — Enter plays it,
             // Backspace cancels (TickConfirmPlay). The actual play runs in BeginNoTargetPlay. We don't
             // touch the targeting handler until confirmed, so cancelling leaves nothing to clean up.
-            _confirmCard = card;
+            Log.Info($"StartPickup → ConfirmPlay (no-target) '{BattleBoardReader.CardName(targetCard)}': use={info.activeUsableActions.Count}");
+            _confirmCard = targetCard;
             _mode = Mode.ConfirmPlay;
-            _router.Speech.Say($"Use {BattleBoardReader.CardName(card)}?", interrupt: true);
+            _router.Speech.Say($"Use {BattleBoardReader.CardName(targetCard)}?", interrupt: true);
             return;
         }
 
         // Target card: pick it up through the game's targeting handler and enter the navigate-and-drop
-        // hold (Backspace cancels; Enter on the destination drops).
+        // hold (Backspace cancels; Enter on the destination drops). TryTargetCard IS the game's own
+        // authority — it runs IsCardTargetable itself, so we don't pre-check (that was redundant).
         _manager.ApplyIdleStatePlacementContext();
-        if (!_manager.TargetingHandler.IsCardTargetable(card))
-        { _router.Speech.Say($"Can't play {BattleBoardReader.CardName(card)} now", interrupt: true); return; }
-
         _placeInit.Reset();
-        if (!_manager.TargetingHandler.TryTargetCard(card, _placeInit))
-        { _router.Speech.Say("Couldn't pick up that card", interrupt: true); return; }
+        if (!_manager.TargetingHandler.TryTargetCard(targetCard, _placeInit))
+        {
+            Log.Info($"StartPickup: TryTargetCard rejected '{BattleBoardReader.CardName(targetCard)}': status={_manager.TargetingHandler.GetTargetabilityStatus(targetCard)} resolved={resolved != null} {PlayDiag(targetCard)}");
+            _router.Speech.Say($"Can't play {BattleBoardReader.CardName(targetCard)} now", interrupt: true); return;
+        }
 
         _holding = true;
-        _heldCard = card;
-        _router.Speech.Say($"Holding {BattleBoardReader.CardName(card)}", interrupt: true);
+        _heldCard = targetCard;
+        _router.Speech.Say($"Holding {BattleBoardReader.CardName(targetCard)}", interrupt: true);
     }
 
     // Confirmed a no-target card → run it through the game's targeting handler aimed at the pending
@@ -804,12 +908,14 @@ internal sealed class BattleScreen : IScreenHandler
     {
         _mode = Mode.Nav;
         if (_manager == null) return;
+        // TryTargetCard is the game's own authority (it runs IsCardTargetable internally) — no pre-check.
         _manager.ApplyIdleStatePlacementContext();
-        if (!_manager.TargetingHandler.IsCardTargetable(card))
-        { _router.Speech.Say($"Can't play {BattleBoardReader.CardName(card)} now", interrupt: true); return; }
         _placeInit.Reset();
         if (!_manager.TargetingHandler.TryTargetCard(card, _placeInit))
-        { _router.Speech.Say("Couldn't play that card", interrupt: true); return; }
+        {
+            Log.Info($"BeginNoTargetPlay: TryTargetCard rejected '{BattleBoardReader.CardName(card)}': status={_manager.TargetingHandler.GetTargetabilityStatus(card)} {PlayDiag(card)}");
+            _router.Speech.Say($"Can't play {BattleBoardReader.CardName(card)} now", interrupt: true); return;
+        }
         _heldCard = card;
         _autoPlaying = true;
         _autoPlayTicks = 0;
@@ -976,6 +1082,56 @@ internal sealed class BattleScreen : IScreenHandler
             return (bool)_ftuePermitMethod.Invoke(m, new object[] { card });
         }
         catch { return true; }
+    }
+
+    // The targeting evaluator (PlacementPurposeEvaluator) decides "is this card placeable" with a
+    // REFERENCE-keyed dictionary built from the hand SENDER's own Card3D instances —
+    // HandController.GetCardsAccessibleForTargeting() = each hand slot's top card. We navigate the
+    // hand off the card OWNER's list (PlayerCardOwner.GetOwnedCards via BattleBoardReader), and after
+    // a hand mutation (a search puts a card into hand, a play removes one) those two sources can hold
+    // DIFFERENT instances for the same logical card. Since IsCardPlaceable is ContainsKey(instance),
+    // our owner-list instance then reads as "not targetable" even though the game says the card is
+    // playable (attachableEntities non-empty). Re-fetch the sender's instance by entityID so we pick
+    // up / target exactly what the evaluator validated. Returns null if the hand has no such card.
+    private Card3D? ResolveHandTargetingInstance(string entityID)
+    {
+        if (string.IsNullOrEmpty(entityID) || _manager == null) return null;
+        try
+        {
+            var hand = _manager.board?.GetPlayer(PlayerID.LOCAL)?.hand;
+            if (hand == null) return null;
+            // Exact instance, when it's the top of its slot.
+            foreach (var c in hand.GetCardsAccessibleForTargeting())
+                if (c != null && c.cardInfo != null && c.cardInfo.entityID == entityID) return c;
+            // Otherwise it's a DUPLICATE buried in a stacked slot. HandCardSlot stacks identical cards
+            // (same cardDataRow.ArchetypeID — shown as ONE pile with a count badge) and only the TOP
+            // card is "accessible for targeting" (GetCardsAccessibleForTargeting = slot top-cards). So a
+            // second copy of the same card reads as un-targetable. Target the slot's top card instead —
+            // an interchangeable copy, so the play is identical: exactly what clicking the visual stack does.
+            foreach (var slot in hand.HandSlots)
+                if (slot != null && slot.DoesSlotContainCardEntityID(entityID))
+                    return slot.GetTopCard();
+        }
+        catch (Exception ex) { Log.Warn($"ResolveHandTargetingInstance threw: {ex.Message}"); }
+        return null;
+    }
+
+    // Diagnostic line for the "you can't play X" exits. The card's legal-play sets are CACHED on
+    // cardInfo (the SDK recomputes them in CardInfo.UpdateAll on every server state update) and a
+    // HAND card's sets are only filled when the SDK's myPlayerInfo.isMyTurn is true. We enter the
+    // play path on CanPerformNewActions / IsSetupPhase, which is a different turn notion — so logging
+    // both the counts AND the two turn flags side by side tells us whether a block is a real game
+    // rule (counts 0 while it genuinely is our turn) or a turn-notion mismatch (mgr says go, SDK
+    // hasn't filled legality). Only called on a block, so the cost is irrelevant.
+    private string PlayDiag(Card3D card)
+    {
+        var info = card?.cardInfo;
+        string counts = info != null
+            ? $"place={info.placeableBoardPos.Count} attach={info.attachableEntities.Count} use={info.activeUsableActions.Count}"
+            : "no cardInfo";
+        bool sdkTurn = false;
+        try { sdkTurn = NetworkMatchController.currentMatchInfo?.myPlayerInfo?.isMyTurn ?? false; } catch { }
+        return $"{counts} canPerform={_manager?.CanPerformNewActions} setup={_manager?.IsSetupPhase} mgrTurn={_manager?.IsMyTurn} sdkTurn={sdkTurn} ftueRun={FTUEHook.FtueIsRunning}";
     }
 
     // On each new coaching step (the FTUE spotlights a different card), announce which card it wants

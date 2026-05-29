@@ -41,6 +41,8 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private string _question = "";
     private readonly List<Option> _options = new();
     private int _idx;
+    private int _line = -1;        // detail-line cursor on the focused card option (-1 = on the header/name)
+    private List<string>? _lines;  // cached detail lines for the focused option; null until first Up/Down resolves it
     private bool _submitted;
     private int _marked;
     private int _target;
@@ -53,6 +55,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private SelectionGroup? _dragGroup;
     private AttachmentDistributionSelectionMenu? _attachMenu;
     private ReparentSelection? _reparentSel;
+    private ReparentDamageMenu? _damageMenu;
+    private DamageSelection? _damageSel;
+    private int _damagePlaced;        // counters (tens) assigned so far this damage prompt
     private readonly KbPlacementInitiator _attachInit = new();   // explicit-commit placement for attach-to-chosen-target
     private bool _attachHolding;
     private int _attachTicks;
@@ -114,6 +119,8 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _handler = handler;
         _options.Clear();
         _idx = 0;
+        _line = -1;
+        _lines = null;
         _submitted = false;
         _marked = 0;
         _target = 0;
@@ -126,6 +133,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _dragGroup = null;
         _attachMenu = null;
         _reparentSel = null;
+        _damageMenu = null;
+        _damageSel = null;
+        _damagePlaced = 0;
         _attachHolding = false;
         _attachReceiver = null;
         _attachEnergy = null;
@@ -146,6 +156,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
         else if (handler is BoardSelectionMenu board && sel.variableSelection is EntitySelection besel) BuildBoardOptions(board, besel);
         else if (handler is ActivePromotionDragMenu drag && sel.variableSelection is EntitySelection dsel) BuildActiveDragOptions(drag, dsel);
         else if (handler is AttachmentDistributionSelectionMenu attach && sel.variableSelection is ReparentSelection rsel) BuildAttachOptions(attach, rsel);
+        else if (handler is ReparentDamageMenu dmg && sel.variableSelection is DamageSelection dmgSel) BuildDamageOptions(dmg, dmgSel);
 
         LogPromptDiagnostics(sel, handler);
     }
@@ -164,6 +175,8 @@ internal sealed class BattlePromptScreen : IScreenHandler
                 groups = "[" + string.Join(", ", es.selectionGroups.Select(g => $"{g?.validOptions?.Count ?? -1} valid / max {g?.maxAmount}")) + "]";
             else if (vs is ReparentSelection rs)
                 groups = $"reparentOptions={rs.reparentOptions?.Count ?? -1} min/max={rs.minReparentedOptions}/{rs.maxReparentedOptions} unlimited={rs.unlimitedReparent}";
+            else if (vs is DamageSelection dsg)
+                groups = $"to={dsg.toDamageSelections?.Count ?? -1} from={dsg.fromDamageSelections?.Count ?? -1} movable={dsg.minMovableDamageTotal}/{dsg.maxMovableDamageTotal} perTarget={dsg.minRecvDamageSingle}/{dsg.maxRecvDamageSingle} targets={dsg.minTargetSelectionCount}/{dsg.maxTargetSelectionCount}";
             Log.Info($"BattlePrompt: handler={handler?.GetType().Name ?? "null"} method={vs?.selectionMethod} selType={vs?.GetType().Name} groups={groups} built={_options.Count} q='{_question}'");
         }
         catch (Exception ex) { Log.Error($"BattlePrompt: diagnostics threw: {ex.Message}"); }
@@ -596,6 +609,98 @@ internal sealed class BattlePromptScreen : IScreenHandler
         catch (Exception ex) { Log.Error($"BattlePrompt attach Done threw: {ex.Message}"); }
     }
 
+    // ---- DAMAGE distribution (ReparentDamageMenu / DamageSelection — e.g. "Put 280 damage on 1 of
+    // your opponent's Pokémon") ----
+    // The selection's OUTPUT is each finalDamageSelections entry's newDamageCounters (counters = tens of
+    // damage). The game's OWN auto-select (DamageSelection.PerformAutoSelection) and the action-timer
+    // timeout (ReparentDamageMenu.OnTimeExpired → RandomDamageSelectionFulfiller) fulfil the selection by
+    // setting those counters and calling the menu's CompleteReparentingAction (which runs SelectInput +
+    // full teardown). We do the same — the identical pattern to submitting the attach menu via its own
+    // method, so this is the game's documented fulfilment path, not a parallel op. Targets come from
+    // toDamageSelections; each pick assigns min(maxRecvDamageSingle, remaining) counters to the chosen
+    // Pokémon, mirroring DamageSelection.AISelection. We don't touch the visual counters — the server
+    // applies the real damage and the BattleLog narrates it.
+
+    private void BuildDamageOptions(ReparentDamageMenu menu, DamageSelection ds)
+    {
+        _damageMenu = menu;
+        _damageSel = ds;
+        _damagePlaced = 0;
+        _target = 0;   // finishes by reaching the total, or the Done option for partial-allowed effects
+        AddDamageTargetOptions();
+        if (string.IsNullOrWhiteSpace(_question))
+            _question = $"Put {ds.maxMovableDamageTotal * 10} damage on a Pokémon";
+    }
+
+    // One "Put N damage on <Pokémon>" per still-eligible target, plus Done when partial placement is legal.
+    private void AddDamageTargetOptions()
+    {
+        _options.Clear();
+        if (_damageSel == null) return;
+        int remaining = _damageSel.maxMovableDamageTotal - _damagePlaced;
+        foreach (var to in _damageSel.toDamageSelections)
+        {
+            if (to == null || string.IsNullOrEmpty(to.entityID)) continue;
+            int amount = DamageAmountFor(to.entityID, remaining);
+            if (amount <= 0) continue;   // this Pokémon is already at its per-target cap
+            var eid = to.entityID;
+            _options.Add(new Option { Name = $"Put {amount * 10} damage on {ResolveName(eid)}", Choose = () => MarkDamage(eid), Eid = eid });
+        }
+        // Partial distribution allowed (min < max) and the minimum already met → let the player stop here.
+        if (_damageSel.minMovableDamageTotal < _damageSel.maxMovableDamageTotal && _damagePlaced >= _damageSel.minMovableDamageTotal)
+            _options.Add(new Option { Name = "Done", Choose = SubmitDamage });
+    }
+
+    // Counters this Pokémon can still take = min(per-target cap minus what it already holds this prompt,
+    // remaining total to distribute). Mirrors the bound DamageSelection.AISelection uses.
+    private int DamageAmountFor(string eid, int remaining)
+    {
+        if (_damageSel == null) return 0;
+        var f = _damageSel.finalDamageSelections.FirstOrDefault(x => x.entityID == eid);
+        int onTarget = f?.NetChange() ?? 0;
+        int perTargetRoom = _damageSel.maxRecvDamageSingle - onTarget;
+        return Math.Max(0, Math.Min(perTargetRoom, remaining));
+    }
+
+    private void MarkDamage(string eid)
+    {
+        if (_damageSel == null || _damageMenu == null) return;
+        var f = _damageSel.finalDamageSelections.FirstOrDefault(x => x.entityID == eid);
+        if (f == null) { _router.Speech.Say("Can't put damage there", interrupt: true); return; }
+        int amount = DamageAmountFor(eid, _damageSel.maxMovableDamageTotal - _damagePlaced);
+        if (amount <= 0) { _router.Speech.Say("That Pokémon can't take more damage", interrupt: true); return; }
+
+        f.newDamageCounters += amount;   // the selection output — same as PerformAutoSelection / the fulfiller
+        _damagePlaced += amount;
+        Log.Info($"BattlePrompt damage: +{amount * 10} on {eid}; placed {_damagePlaced}/{_damageSel.maxMovableDamageTotal} counters");
+
+        // All the damage is placed → submit (mirrors the menu's own auto-submit when the limit is reached).
+        if (_damagePlaced >= _damageSel.maxMovableDamageTotal) { SubmitDamage(); return; }
+
+        // More to distribute (spread effects): announce progress and re-list the remaining targets.
+        _router.Speech.Say($"{amount * 10} damage on {ResolveName(eid)}. {(_damageSel.maxMovableDamageTotal - _damagePlaced) * 10} damage left; choose another Pokémon.", interrupt: true);
+        AddDamageTargetOptions();
+        _idx = 0;
+        _line = -1; _lines = null;
+    }
+
+    // Submit through the menu's OWN CompleteReparentingAction (private — reflect it, same as the attach
+    // menu's submit). It sends the selection we built (SelectInput) and tears the menu down.
+    private void SubmitDamage()
+    {
+        if (_damageMenu == null) return;
+        if (_damageSel != null && _damagePlaced < _damageSel.minMovableDamageTotal)
+        { _router.Speech.Say($"Place {(_damageSel.minMovableDamageTotal - _damagePlaced) * 10} more damage first", interrupt: true); return; }
+        _submitted = true;
+        try
+        {
+            var m = typeof(ReparentDamageMenu).GetMethod("CompleteReparentingAction", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (m != null) m.Invoke(_damageMenu, null);
+            else Log.Error("BattlePrompt: ReparentDamageMenu.CompleteReparentingAction not found");
+        }
+        catch (Exception ex) { Log.Error($"BattlePrompt damage submit threw: {ex.Message}"); }
+    }
+
     private static string ResolveName(string entityID)
     {
         var mm = MatchManager.GetInstanceFromScene();
@@ -629,6 +734,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     private void Announce()
     {
+        _line = -1; _lines = null;   // re-orient to the header whenever we (re)announce
         if (!string.IsNullOrWhiteSpace(_question)) _router.Speech.Say(_question, interrupt: true);
         if (_options.Count > 0) _router.Speech.Say(OptionLabel(_idx), interrupt: false);
     }
@@ -664,8 +770,14 @@ internal sealed class BattlePromptScreen : IScreenHandler
         if (!Application.isFocused || _submitted) return;  // wait silently for the close after submit
         if (_attachHolding) { TickAttachCommit(); return; }   // committing an attach onto the chosen Pokémon
 
-        if (Input.GetKeyDown(KeyCode.DownArrow) || Input.GetKeyDown(KeyCode.RightArrow)) { Move(1); return; }
-        if (Input.GetKeyDown(KeyCode.UpArrow) || Input.GetKeyDown(KeyCode.LeftArrow)) { Move(-1); return; }
+        // Left/Right move between options (they're a horizontal row on screen). Up/Down read the
+        // focused card's detail lines (HP, type, each attack/ability) like board-card reading — so the
+        // arrows don't all collapse into option-cycling. Options with no card (text choices, Done/Back,
+        // face-down prizes) have nothing to read, so Up/Down fall back to moving there.
+        if (Input.GetKeyDown(KeyCode.RightArrow)) { Move(1); return; }
+        if (Input.GetKeyDown(KeyCode.LeftArrow)) { Move(-1); return; }
+        if (Input.GetKeyDown(KeyCode.DownArrow)) { ReadLine(1); return; }
+        if (Input.GetKeyDown(KeyCode.UpArrow)) { ReadLine(-1); return; }
         if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) { Choose(); return; }
         for (int d = 1; d <= 9; d++)
             if (Input.GetKeyDown(KeyCode.Alpha1 + (d - 1)) || Input.GetKeyDown(KeyCode.Keypad1 + (d - 1))) { JumpTo(d - 1); return; }
@@ -686,6 +798,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
         int next = Mathf.Clamp(_idx + delta, 0, _options.Count - 1);
         if (next == _idx) return;
         _idx = next;
+        _line = -1; _lines = null;   // new option → reset line cursor; lines re-resolve on next Up/Down
         _router.Speech.Say(OptionLabel(_idx), interrupt: true);
     }
 
@@ -693,7 +806,77 @@ internal sealed class BattlePromptScreen : IScreenHandler
     {
         if (i < 0 || i >= _options.Count) return;
         _idx = i;
+        _line = -1; _lines = null;
         _router.Speech.Say(OptionLabel(_idx), interrupt: true);
+    }
+
+    // Read the focused option's card line-by-line (Down = next line, Up = previous, back past line 0 =
+    // the option header). Mirrors board-card reading so "card-related stuff" reads the same everywhere.
+    // An option with no resolvable card (text choice, Done/Back, face-down prize) has nothing to read,
+    // so Up/Down move between options there instead — the player never gets stuck on a dead axis.
+    private void ReadLine(int dir)
+    {
+        if (_options.Count == 0) return;
+        EnsureLines();
+        if (_lines == null || _lines.Count == 0) { Move(dir); return; }   // nothing to read → move options
+        if (dir > 0)
+        {
+            if (_line < _lines.Count - 1) { _line++; _router.Speech.Say(_lines[_line], interrupt: true); }
+            else _router.Speech.Say("Last line", interrupt: true);
+        }
+        else if (_line >= 0)
+        {
+            _line--;
+            _router.Speech.Say(_line < 0 ? OptionLabel(_idx) : _lines[_line], interrupt: true);
+        }
+        else _router.Speech.Say(OptionLabel(_idx), interrupt: true);
+    }
+
+    // Resolve + cache the focused option's detail lines on first Up/Down. Empty list = no card to read.
+    private void EnsureLines()
+    {
+        if (_lines != null) return;
+        var card = ResolveCardForRead(_options[_idx].Eid);
+        _lines = card != null ? BattleBoardReader.DetailLines(card) : new List<string>();
+        _line = -1;
+    }
+
+    private static readonly BattleBoardReader.Zone[] _readZones =
+    {
+        BattleBoardReader.Zone.MyActive, BattleBoardReader.Zone.MyBench,
+        BattleBoardReader.Zone.OppActive, BattleBoardReader.Zone.OppBench, BattleBoardReader.Zone.MyDiscard,
+    };
+
+    // Find the live Card3D for an option's entityID WITHOUT side effects (NOT MatchManager.GetCard,
+    // which rewrites CardAddress / returns a big-card view for hidden cards). Selection overlays hold
+    // their cards in SelectionCardOwners (the carousel/list); board & active-drag picks are public board
+    // cards. Read-only and run on demand (a key press), so the scan cost is irrelevant.
+    private Card3D? ResolveCardForRead(string? eid)
+    {
+        if (string.IsNullOrEmpty(eid)) return null;
+        try
+        {
+            foreach (var owner in UnityEngine.Object.FindObjectsByType<SelectionCardOwner>(FindObjectsSortMode.None))
+            {
+                if (owner == null) continue;
+                foreach (var c in owner.GetOwnedCards())
+                    if (c != null && c.entityID == eid) return c;
+            }
+            if (_mgr != null)
+            {
+                // The hand (discard-from-hand prompts like Ultra Ball's cost): scan EVERY hand card —
+                // the discard source is the HandFanController, not a SelectionCardOwner, so the scan
+                // above misses it, and GetCards(MyHand) returns only pile top-cards (would miss a
+                // buried duplicate). GetHandCardsAll returns all copies.
+                foreach (var c in BattleBoardReader.GetHandCardsAll(_mgr))
+                    if (c != null && c.entityID == eid) return c;
+                foreach (var z in _readZones)
+                    foreach (var c in BattleBoardReader.GetCards(_mgr, z))
+                        if (c != null && c.entityID == eid) return c;
+            }
+        }
+        catch (Exception ex) { Log.Warn($"BattlePrompt: ResolveCardForRead threw: {ex.Message}"); }
+        return null;
     }
 
     private void Choose()
