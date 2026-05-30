@@ -29,6 +29,22 @@ internal static class UiLabels
     public static string? Friendly(string? goName)
         => goName != null && Names.TryGetValue(goName, out var n) ? n : null;
 
+    // HUB top-strip tab label with the game's selected state appended ("HOME, selected"). The
+    // selected tab is the one whose PersistentNavButtonGroup animator is in its "On" state — the
+    // same signal the game uses to highlight the current tab. Other strips already say
+    // selected/not-selected for their toggles; this gives the top strip parity.
+    public static string TopNavLabel(Selectable s)
+    {
+        var label = Navigation.KeyboardNavigator.DefaultLabel(s);
+        try
+        {
+            var grp = s.GetComponentInParent<PersistentNavButtonGroup>();
+            if (grp != null && grp.IsOn()) return $"{label}, selected";
+        }
+        catch { }
+        return label;
+    }
+
     // Rich label for composite widgets. Currently: a shop product tile (ShopProductController) —
     // the FTUE focuses `product.GetComponentInChildren<Button>()`, so the focused control sits
     // INSIDE the product; its own text is just a price or icon ("Button"/"200"). Read the tile's

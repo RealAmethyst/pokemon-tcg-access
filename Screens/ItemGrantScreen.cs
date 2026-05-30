@@ -14,11 +14,12 @@ namespace PokemonTCGLiveAccessibility.Screens;
 // (OnClick → AnimateOut → ShowNextItem) reveals the next; `collectAllButton` skips to the end;
 // once everything is shown `currentItem` goes null and a results display appears.
 //
-// We read each reward as the player flips through it: for a card we resolve its CardDataRow via
-// CardDatabaseManager.TryGetCardFromDatabase(clientId) — the same printed data the battle reader
-// uses — and speak name + type, with Down/Up walking the detail lines (HP, weakness, attacks).
-// Enter / Backspace advances to the next reward (currentItem.OnClick); C collects all; on the
-// final results display Enter closes (OnFinalDisplayClick).
+// We read each reward as the player flips through it: a card resolves its CardDataRow via
+// CardDatabaseManager.TryGetCardFromDatabase(clientId) (name + type, Down/Up walk the detail lines);
+// a non-card reward (currency/token/sleeve) reads the overlay's own displayed name + amount
+// (ContentItemRewardUI.titleTxt + footerTxt — "Event Token, Amount 10"). Enter / Backspace advances
+// (currentItem.OnClick); Left/Right move between the reward and the Collect All button (so it's
+// reachable and read by name); on the final results display Enter closes (OnFinalDisplayClick).
 internal sealed class ItemGrantScreen : IScreenHandler
 {
     private static ItemGrantScreen? _instance;
@@ -31,6 +32,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
     private List<string> _lines = new();
     private int _lineIndex = -1;                    // -1 = on the name/header; 0..n-1 = detail lines
     private bool _finalAnnounced;
+    private int _focus;                             // 0 = the reward item, 1 = the Collect All button
 
     public string Name => "Rewards";
 
@@ -96,16 +98,50 @@ internal sealed class ItemGrantScreen : IScreenHandler
         }
         if (!Application.isFocused) return;
 
+        // Final "COLLECTED" summary (resultsDisplay active): read the totals + the DONE button.
+        if (ResultsActive())
+        {
+            if (!_finalAnnounced) { _finalAnnounced = true; _shown = null; AnnounceCollected(interrupt: true); }
+            if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)
+             || UnityEngine.Input.GetKeyDown(KeyCode.Backspace))
+                _overlay.OnFinalDisplayClick();
+            return;
+        }
+        _finalAnnounced = false;
+
         var item = _overlay.currentItem;
         if (item != _shown)
         {
             _shown = item;
             _lineIndex = -1;
-            AnnounceItem(item, interrupt: true);
+            _focus = 0;
+            if (item != null) AnnounceItem(item, interrupt: true);
         }
 
         if (item != null)
         {
+            // Left/Right move between the reward (focus 0) and the Collect All button (focus 1),
+            // so the button is reachable + read by name — no hidden shortcut, no hint.
+            bool hasCollectAll = _overlay.collectAllButton != null && _overlay.collectAllButton.isActiveAndEnabled;
+            if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow))
+            {
+                if (_focus != 0) { _focus = 0; _lineIndex = -1; AnnounceItem(item, interrupt: true); }
+                return;
+            }
+            if (UnityEngine.Input.GetKeyDown(KeyCode.RightArrow))
+            {
+                if (hasCollectAll && _focus != 1) { _focus = 1; _router.Speech.Say(CollectAllLabel(), interrupt: true); }
+                return;
+            }
+
+            if (_focus == 1)
+            {
+                if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter))
+                    CollectAll();
+                return;
+            }
+
+            // On the reward: Down/Up walk its detail lines (cards); Enter advances to the next reward.
             if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow))
             {
                 if (_lines.Count > 0)
@@ -125,21 +161,55 @@ internal sealed class ItemGrantScreen : IScreenHandler
             {
                 item.OnClick();   // advance to the next reward (or the results display)
             }
-            else if (UnityEngine.Input.GetKeyDown(KeyCode.C))
-            {
-                CollectAll();
-            }
         }
-        else
-        {
-            // Final results display: everything revealed; Enter / Backspace closes the overlay.
-            if (UnityEngine.Input.GetKeyDown(KeyCode.Return)
-             || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)
-             || UnityEngine.Input.GetKeyDown(KeyCode.Backspace))
-            {
-                _overlay.OnFinalDisplayClick();
-            }
-        }
+    }
+
+    // The final "COLLECTED" summary: read the totals (cards + each currency) and the DONE button.
+    private void AnnounceCollected(bool interrupt)
+    {
+        var stats = CollectedStats();
+        var msg = string.IsNullOrWhiteSpace(stats) ? "Collected" : $"Collected. Total collected: {stats}";
+        msg += ". Done";   // the only action; Enter / Backspace presses it
+        _router.Speech.Say(msg, interrupt);
+        Log.Info($"ItemGrant COLLECTED: {stats}");
+    }
+
+    private bool ResultsActive()
+    {
+        var rd = ReadField<Component>(_overlay!, "resultsDisplay");
+        return rd != null && rd.gameObject.activeInHierarchy;
+    }
+
+    private string CollectedStats()
+    {
+        var rd = ReadField<Component>(_overlay!, "resultsDisplay");
+        if (rd == null) return string.Empty;
+        var parts = new List<string>();
+        AddStat(rd, "cardsCollectedContainer", "cardCountTxt", "cards", parts);
+        AddStat(rd, "hardCollectedContainer", "hardCountTxt", "Crystals", parts);
+        AddStat(rd, "traderCollectedContainer", "traderCountTxt", "Credits", parts);
+        AddStat(rd, "tokensCollectedContainer", "tokenCountTxt", "Event Tokens", parts);
+        return string.Join(", ", parts);
+    }
+
+    // Read one TOTAL-COLLECTED stat if its container is shown; the count text is just the number, so
+    // append the type label unless the loc already worded it.
+    private static void AddStat(object rd, string containerField, string txtField, string label, List<string> parts)
+    {
+        var container = ReadField<GameObject>(rd, containerField);
+        if (container == null || !container.activeInHierarchy) return;
+        var txt = TmpOf(ReadField<Component>(rd, txtField))?.Trim();
+        if (string.IsNullOrWhiteSpace(txt)) return;
+        parts.Add(HasLetter(txt!) ? txt! : $"{txt} {label}");
+    }
+
+    private static bool HasLetter(string s) { foreach (var c in s) if (char.IsLetter(c)) return true; return false; }
+
+    private string CollectAllLabel()
+    {
+        var btn = _overlay?.collectAllButton;
+        var t = btn != null ? btn.GetComponentInChildren<TMPro.TMP_Text>(includeInactive: false) : null;
+        return t != null && !string.IsNullOrWhiteSpace(t.text) ? t.text : "Collect All";
     }
 
     private void CollectAll()
@@ -151,15 +221,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
 
     private void AnnounceItem(ContentItemRewardController? item, bool interrupt)
     {
-        if (item == null)
-        {
-            if (!_finalAnnounced)
-            {
-                _finalAnnounced = true;
-                _router.Speech.Say("All rewards revealed.", interrupt);
-            }
-            return;
-        }
+        if (item == null) return;
         _finalAnnounced = false;
         _lines = new List<string>();
 
@@ -175,10 +237,25 @@ internal sealed class ItemGrantScreen : IScreenHandler
         }
         else
         {
-            // Non-card reward (currency, sleeve, deck box, …) — we don't format these yet; speak a
-            // best-effort label so the player at least knows a reward is here and can advance past it.
-            _router.Speech.Say(string.IsNullOrEmpty(clientId) ? "Reward" : clientId!, interrupt);
+            // Non-card reward (currency, token, sleeve, deck box, …) — read the overlay's OWN
+            // displayed name + amount (ContentItemRewardUI.titleTxt e.g. "Event Token" + footerTxt
+            // "Amount 10"), so it reads like what's on screen instead of a raw item id.
+            var ui = ReadField<Component>(item, "ui");
+            var name = ui != null ? TmpOf(ReadField<Component>(ui, "titleTxt")) : null;
+            var amount = ui != null ? TmpOf(ReadField<Component>(ui, "footerTxt")) : null;
+            var parts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(name)) parts.Add(name!);
+            if (!string.IsNullOrWhiteSpace(amount)) parts.Add(amount!);
+            if (parts.Count == 0 && !string.IsNullOrEmpty(clientId)) parts.Add(clientId!);
+            _router.Speech.Say(parts.Count > 0 ? string.Join(", ", parts) : "Reward", interrupt);
         }
+    }
+
+    private static string? TmpOf(Component? c)
+    {
+        if (c == null) return null;
+        var t = c.GetComponent<TMPro.TMP_Text>() ?? c.GetComponentInChildren<TMPro.TMP_Text>(includeInactive: false);
+        return t != null && !string.IsNullOrWhiteSpace(t.text) ? t.text : null;
     }
 
     private static T? ReadField<T>(object instance, string name) where T : class

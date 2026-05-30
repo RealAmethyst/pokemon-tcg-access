@@ -236,7 +236,7 @@ internal sealed class HUBShopScreen : IScreenHandler
         {
             var ordered = topItems.OrderBy(s => ReadingOrder(s.transform)).ToList();
             foreach (var s in ordered) known.Add(s);
-            AddGroup(ordered);
+            AddGroup(ordered, resolver: Util.UiLabels.TopNavLabel);
         }
 
         // Group 2: shop sub-tabs (BUNDLES / EXPANSIONS / REDEEM) — PageDragTab toggles, radio.

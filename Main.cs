@@ -51,7 +51,13 @@ public class Mod : MelonMod
         HUBProfileScreen.Install(HarmonyInstance, _router);
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);
+        HUBDeckSelectScreen.Install(HarmonyInstance, _router);
+        HUBEditDeckScreen.Install(HarmonyInstance, _router);
         ItemGrantScreen.Install(HarmonyInstance, _router);
+        RewardOverlayScreen.Install(HarmonyInstance, _router);
+        GiftOverlayScreen.Install(HarmonyInstance, _router);
+        NewsOverlayScreen.Install(HarmonyInstance, _router);
+        HUBOverflowMenuScreen.Install(HarmonyInstance, _router);
         AvatarCategoryScreen.Install(HarmonyInstance, _router);
         FTUEBattleIntroScreen.Install(HarmonyInstance, _router);
         BattleScreen.Install(HarmonyInstance, _router);

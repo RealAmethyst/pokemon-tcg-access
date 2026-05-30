@@ -278,7 +278,7 @@ internal sealed class HUBHomeScreen : IScreenHandler
         {
             var ordered = topItems.OrderBy(s => ReadingOrder(s.transform)).ToList();
             foreach (var s in ordered) known.Add(s);
-            AddGroup(ordered);
+            AddGroup(ordered, resolver: Util.UiLabels.TopNavLabel);
         }
 
         // --- Group 2: game-mode sub-tabs (Ranked / Casual / Learn / Build & Battle). ---

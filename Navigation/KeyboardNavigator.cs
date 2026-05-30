@@ -99,6 +99,59 @@ internal sealed class KeyboardNavigator
     // press Up again, escape lands on the HOME tab (col 0 of the top strip).
     public int CurrentColumn => _index >= 0 ? _index % Columns : -1;
 
+    public IReadOnlyList<Selectable> Items => _items;
+
+    // Focus a specific item by index (used by handler-driven / spatial navigation).
+    public void FocusIndex(int i, bool announce = true, bool interrupt = true)
+    {
+        if (i < 0 || i >= _items.Count) return;
+        SetIndex(i, announce, interrupt, announceGroup: false);
+    }
+
+    // 2-D spatial move: from the focused item, pick the nearest navigable item in the (dx,dy) screen
+    // direction (dy>0 = up). Returns false when there's nothing that way — the screen handler uses
+    // that to escape to an adjacent section (HOME-style). Works for irregular grids where fixed-
+    // Columns math strands items (e.g. a 2-then-4 button panel), so Right and Down differ correctly.
+    public bool TrySpatialMove(int dx, int dy, bool announce = true)
+    {
+        if (_index < 0 || _index >= _items.Count) { FocusFirst(announce); return _index >= 0; }
+        int target = SpatialPick(_items, _index, dx, dy);
+        if (target < 0) return false;
+        SetIndex(target, announce, interrupt: true, announceGroup: false);
+        return true;
+    }
+
+    private static int SpatialPick(IReadOnlyList<Selectable> items, int cur, float dx, float dy)
+    {
+        if (cur < 0 || cur >= items.Count || items[cur] == null) return -1;
+        var from = WorldCenter(items[cur]);
+        int best = -1; float bestScore = float.MaxValue;
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (i == cur || items[i] == null || !items[i].isActiveAndEnabled) continue;
+            var c = WorldCenter(items[i]);
+            float ox = c.x - from.x, oy = c.y - from.y;
+            float along = ox * dx + oy * dy;            // distance in the chosen direction
+            if (along <= 2f) continue;                  // must be that way (small deadzone)
+            float perp = Mathf.Abs(ox * dy - oy * dx);  // sideways offset from the axis
+            float score = along + perp * 2.5f;          // prefer aligned + close
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+        return best;
+    }
+
+    public static Vector2 WorldCenter(Selectable s)
+    {
+        if (s.transform is RectTransform rt)
+        {
+            var c = new Vector3[4];
+            rt.GetWorldCorners(c);
+            return (c[0] + c[2]) * 0.5f;
+        }
+        var p = s.transform.position;
+        return new Vector2(p.x, p.y);
+    }
+
     public void SetItems(IEnumerable<Selectable> items, LabelResolver? resolver = null)
     {
         _items.Clear();

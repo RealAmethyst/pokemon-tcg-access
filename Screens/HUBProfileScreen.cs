@@ -391,7 +391,7 @@ internal sealed class HUBProfileScreen : IScreenHandler
                     .Cast<Selectable>()
                     .ToList();
                 if (tabButtons.Count > 0)
-                    AddGroup(tabButtons);
+                    AddGroup(tabButtons, Util.UiLabels.TopNavLabel);
             }
         }
 
@@ -523,10 +523,10 @@ internal sealed class HUBProfileScreen : IScreenHandler
             AddGroup(others);
     }
 
-    private void AddGroup(List<Selectable> items)
+    private void AddGroup(List<Selectable> items, KeyboardNavigator.LabelResolver? resolver = null)
     {
         var g = new KeyboardNavigator(_router.Speech) { AllowTab = false };
-        g.SetItems(items);
+        g.SetItems(items, resolver);
         _groups.Add(g);
         var names = string.Join(", ", items.Take(20).Select(s => s != null ? s.gameObject.name : "<null>"));
         var extra = items.Count > 20 ? $" (+{items.Count - 20} more)" : string.Empty;

@@ -93,6 +93,32 @@ internal static class FTUEHook
         }
     }
 
+    // Deck-editor tutorial target. FTUEDeckEditorIndicator highlights a specific card (its focused
+    // element — the count badge / card button — is reparented under a Blocker, so we can't walk to
+    // its CardStubParts). But the indicator itself carries the target card id + element type, so the
+    // deck-editor handler reads them to announce "the tutorial wants you to add X" and jump to it.
+    private static readonly FieldInfo? _deckCardIdField = AccessTools.Field(typeof(FTUEDeckEditorIndicator), "cardId");
+    private static readonly FieldInfo? _deckElementField = AccessTools.Field(typeof(FTUEDeckEditorIndicator), "element");
+
+    public static bool DeckEditorFtueActive => FindTrackedDeckIndicator() != null;
+
+    public static string? DeckEditorFtueCardId
+    {
+        get { var ind = FindTrackedDeckIndicator(); return ind != null ? _deckCardIdField?.GetValue(ind) as string : null; }
+    }
+
+    public static string? DeckEditorFtueElement
+    {
+        get { var ind = FindTrackedDeckIndicator(); return ind != null ? _deckElementField?.GetValue(ind)?.ToString() : null; }
+    }
+
+    private static object? FindTrackedDeckIndicator()
+    {
+        for (int i = 0; i < _trackedStates.Count; i++)
+            if (_trackedStates[i] is FTUEDeckEditorIndicator) return _trackedStates[i];
+        return null;
+    }
+
     private static bool IsPassiveWaitState(object state)
     {
         // The "FTUE is now waiting for the user to do something" states. The animator parks
