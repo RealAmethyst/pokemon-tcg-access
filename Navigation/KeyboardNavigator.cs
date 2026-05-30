@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using PokemonTCGLiveAccessibility.Speech;
 using TMPro;
 using UnityEngine;
@@ -38,6 +39,14 @@ internal sealed class KeyboardNavigator
     public bool AllowVertical { get; set; } = true;
     public bool AllowHorizontal { get; set; } = false;
     public bool AllowTab { get; set; } = false;
+
+    // When true, Toggle items act like radio buttons / tabs instead of checkboxes: Enter or
+    // Space *selects* the focused item (sets isOn = true) and never un-toggles it. The items
+    // are expected to share a ToggleGroup, so selecting one turns the previously-selected one
+    // off and fires the game's own onValueChanged (e.g. a game-mode tab → view switch). Supply
+    // a custom label resolver for these ("Ranked, selected") — the default checkbox label
+    // ("checked/unchecked") reads wrong for a tab strip.
+    public bool RadioToggleMode { get; set; } = false;
 
     // For grid layouts. Up/Down moves by Columns items at a time; Left/Right by 1. Auto-
     // computed in SetItems from item positions (count of items in the first row). Defaults
@@ -261,7 +270,16 @@ internal sealed class KeyboardNavigator
         if (!IsUsable(sel)) return false;
         if (sel is Toggle toggle)
         {
-            // Space toggles, Enter is a no-op on checkboxes (web/desktop convention).
+            if (RadioToggleMode)
+            {
+                // Tab / radio semantics: Enter or Space selects; "un-selecting" the active tab
+                // is meaningless. Setting isOn drives the shared ToggleGroup (turns the old tab
+                // off) and fires the game's onValueChanged → the real view switch.
+                if (!toggle.isOn) toggle.isOn = true;
+                Speak(interrupt: true);   // re-announce; the item now reads as selected
+                return true;
+            }
+            // Checkbox semantics (default): Space toggles, Enter is a no-op (web/desktop convention).
             if (!isSpaceKey) return false;
             toggle.isOn = !toggle.isOn;
             // Just speak the new state — user already knows which checkbox they pressed.
@@ -513,16 +531,72 @@ internal sealed class KeyboardNavigator
 
     private static string ResolveBaseLabel(Selectable s)
     {
-        var tmp = s.GetComponentInChildren<TMP_Text>(includeInactive: false);
-        if (tmp != null && !string.IsNullOrEmpty(tmp.text)) return tmp.text;
-        var txt = s.GetComponentInChildren<Text>(includeInactive: false);
-        if (txt != null && !string.IsNullOrEmpty(txt.text)) return txt.text;
-        return StripPrefabSuffix(s.gameObject.name);
+        // Composite widgets whose meaning is more than one text child — e.g. a shop product tile,
+        // where the focused control's own text is just a price/icon. UiLabels reads the owning
+        // controller (name + price). Wins over everything else.
+        var rich = Util.UiLabels.Describe(s);
+        if (rich != null) return rich;
+
+        // Game-specific friendly name for icon-only / badge-only buttons (e.g. the Battle Pass
+        // shortcut whose only text child is a "1" notification badge — see UiLabels).
+        var friendly = Util.UiLabels.Friendly(s.gameObject.name);
+        if (friendly != null) return friendly;
+
+        // Prefer a real worded label: the first text child that contains a letter. This skips a
+        // leading numeric notification badge so a labelled button reads by its name, not its count.
+        foreach (var t in s.GetComponentsInChildren<TMP_Text>(includeInactive: false))
+            if (HasLetter(t.text)) return t.text;
+        foreach (var t in s.GetComponentsInChildren<Text>(includeInactive: false))
+            if (HasLetter(t.text)) return t.text;
+
+        // No worded label — fall back to any non-empty text (e.g. a shop price "200", a count).
+        // For a number-only control that text IS the meaningful label, so prefer it over the
+        // generic humanized GameObject name ("Button"). Badge-bearing buttons that DO have a real
+        // name are caught above (letter text) or by the friendly map, so this only fires when the
+        // number is genuinely all there is. Skip progress fractions ("11/122") — those are
+        // collection/quest counters, never a control's name or price, and mislead as a label.
+        foreach (var t in s.GetComponentsInChildren<TMP_Text>(includeInactive: false))
+            if (IsLabelish(t.text)) return t.text.Trim();
+        foreach (var t in s.GetComponentsInChildren<Text>(includeInactive: false))
+            if (IsLabelish(t.text)) return t.text.Trim();
+
+        return Humanize(s.gameObject.name);
     }
 
-    // Real game text wins (it's already authored). This only cleans the GameObject-name fallback
-    // we hit for icon-only buttons (X close, back arrow, etc.) — Unity prefab convention is
-    // "CloseButton" / "BackBtn", which is noise to read aloud.
+    private static bool IsLabelish(string? s)
+        => !string.IsNullOrWhiteSpace(s) && !s!.Contains("/");
+
+    private static bool HasLetter(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return false;
+        foreach (var c in s!) if (char.IsLetter(c)) return true;
+        return false;
+    }
+
+    // Turn a prefab GameObject name into something speakable for icon-only controls: drop
+    // Button/Btn affixes and split CamelCase / snake_case into words. "ExpansionChallengeButton"
+    // → "Expansion Challenge", "Btn_Rank" → "Rank". Used only when a control has no readable
+    // text label of its own.
+    private static string Humanize(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return name;
+        name = StripPrefabSuffix(name);
+        foreach (var pre in PrefabPrefixes)
+            if (name.Length > pre.Length && name.StartsWith(pre, StringComparison.OrdinalIgnoreCase))
+            { name = name.Substring(pre.Length).TrimStart('_', ' '); break; }
+        name = name.Replace('_', ' ');
+
+        var sb = new StringBuilder(name.Length + 4);
+        for (int i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && char.IsUpper(c) && !char.IsUpper(name[i - 1]) && name[i - 1] != ' ')
+                sb.Append(' ');
+            sb.Append(c);
+        }
+        return sb.ToString().Trim();
+    }
+
     private static string StripPrefabSuffix(string name)
     {
         if (string.IsNullOrEmpty(name)) return name;
@@ -535,4 +609,5 @@ internal sealed class KeyboardNavigator
     }
 
     private static readonly string[] PrefabSuffixes = { "_Button", " Button", "Button", "_Btn", " Btn", "Btn" };
+    private static readonly string[] PrefabPrefixes = { "Btn_", "Button_", "Btn", "Button" };
 }

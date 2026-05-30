@@ -21,9 +21,13 @@ namespace PokemonTCGLiveAccessibility.Hooks;
 //      MenuButtonController.Focus(elementPos), which reparents that button under a UI
 //      blocker so only that button is clickable. Our keyboard nav has to follow.
 //
-// FocusedElement is updated by a Harmony postfix on MenuButtonController.Focus / Unfocus.
-// `previousElement.elements[0]` is the highlighted Selectable (Button / Toggle / InputField);
-// we expose it directly. Screens query FTUEHook.FocusedElement each Tick / on resume.
+// FocusedElement is updated by a Harmony postfix on the MenuButtonController.previousElement
+// SETTER (not the individual Focus overloads). Every Focus path — the public Focus(int,…) AND
+// the protected Focus(Selectable,List<…>,…) used for the Battle Pass tier reward — funnels
+// through `previousElement = new FocusedElement(…)`, so hooking the setter catches them all.
+// (Hooking only Focus(int,…) missed the multi-arg overload, so the tier-reward button never
+// surfaced.) `previousElement.elements[0]` is the highlighted Selectable; we expose it directly.
+// Clears come through Unfocus(). Screens query FTUEHook.FocusedElement each Tick / on resume.
 internal static class FTUEHook
 {
     public static Selectable? FocusedElement { get; private set; }
@@ -106,15 +110,17 @@ internal static class FTUEHook
 
     public static void Install(HarmonyLib.Harmony harmony)
     {
-        // The virtual signature: Focus(int elementPos, FTUEGuidanceImage, string id, bool focusOnly, RainierScreenIndicator)
-        var focus = AccessTools.Method(typeof(MenuButtonController), nameof(MenuButtonController.Focus),
-            new[] { typeof(int), typeof(FTUEGuidanceImage), typeof(string), typeof(bool), typeof(RainierScreenIndicator) });
-        if (focus == null)
+        // Hook the previousElement SETTER — every Focus overload sets it, so this captures the
+        // public Focus(int,…) AND the protected Focus(Selectable,List<…>,…) the Battle Pass tier
+        // reward (ChallengeScreenButtonController, elementPos 8 / TierZero) routes through. The
+        // old per-overload hook only saw Focus(int,…), so TierZero never surfaced.
+        var setter = AccessTools.PropertySetter(typeof(MenuButtonController), "previousElement");
+        if (setter == null)
         {
-            Log.Error("FTUEHook: could not resolve MenuButtonController.Focus(int,FTUEGuidanceImage,string,bool,RainierScreenIndicator)");
+            Log.Error("FTUEHook: could not resolve MenuButtonController.previousElement setter");
             return;
         }
-        harmony.Patch(focus, postfix: new HarmonyMethod(AccessTools.Method(typeof(FTUEHook), nameof(Focus_Postfix))));
+        harmony.Patch(setter, postfix: new HarmonyMethod(AccessTools.Method(typeof(FTUEHook), nameof(PreviousElement_Postfix))));
 
         // Unfocus()  — clears the FTUE highlight when the user clicks the focused button or
         // when an Indicator state exits without forwarding.
@@ -136,24 +142,40 @@ internal static class FTUEHook
         Log.Info("FTUEHook installed");
     }
 
-    private static void Focus_Postfix(MenuButtonController __instance)
+    private static void PreviousElement_Postfix(MenuButtonController __instance)
     {
-        // After Focus runs the controller's previousElement is the FocusedElement just built.
-        // FocusedElement.elements[0] is always the primary Selectable (Button/Toggle/InputField).
+        // The setter just ran; previousElement is the FocusedElement just built (or null).
+        // FocusedElement.elements[0] is the primary Selectable (Button/Toggle/InputField).
         try
         {
             var prev = __instance.previousElement;
             var selectable = prev?.elements?.Count > 0 ? prev.elements[0] : null;
-            if (selectable == FocusedElement) return;
+            // Ignore the transient null the game sets in ClearPrevious() right before each new
+            // focus — real clears come through Unfocus(). Only react to an actual new element.
+            if (selectable == null || selectable == FocusedElement) return;
             FocusedElement = selectable;
-            var label = selectable != null ? selectable.gameObject.name : "<null>";
-            Log.Info($"FTUE focus: {label}");
+            Log.Info($"FTUE focus: {selectable.gameObject.name}  chain: {ParentChain(selectable.transform)}");
             FocusedElementChanged?.Invoke();
         }
         catch (Exception ex)
         {
-            Log.Warn($"FTUEHook.Focus_Postfix threw: {ex.Message}");
+            Log.Warn($"FTUEHook.PreviousElement_Postfix threw: {ex.Message}");
         }
+    }
+
+    // Names of the focused element's ancestors (a few levels up) — a cheap diagnostic for
+    // figuring out what an unlabeled "Button" actually is when its own name isn't enough
+    // (e.g. "Button  chain: ExpansionSelection(Clone) < SeriesGroup < …" tells us it's a set tile).
+    private static string ParentChain(UnityEngine.Transform t)
+    {
+        var sb = new System.Text.StringBuilder();
+        int depth = 0;
+        for (var p = t != null ? t.parent : null; p != null && depth < 8; p = p.parent, depth++)
+        {
+            if (sb.Length > 0) sb.Append(" < ");
+            sb.Append(p.gameObject.name);
+        }
+        return sb.ToString();
     }
 
     private static void Unfocus_Postfix()

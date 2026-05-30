@@ -71,6 +71,7 @@ internal sealed class LanguageSelectScreen : IScreenHandler
             .GetComponentsInChildren<Button>(includeInactive: false)
             .Where(b => !debug.Contains(b))
             .Cast<UnityEngine.UI.Selectable>()
+            .OrderBy(s => ReadingOrder(s.transform))   // row-major: grid Up/Down/Left/Right must line up with the visual
             .ToList();
 
         if (langButtons.Count == 0)
@@ -80,11 +81,13 @@ internal sealed class LanguageSelectScreen : IScreenHandler
         }
 
         _nav.SetItems(langButtons);
-        // Explicit override: visually a 2-column grid, but user prefers list behavior here —
-        // up/down through all 7 languages; left/right and Tab ignored. SetItems' auto-detect
-        // would have picked (vertical, horizontal) for a grid-ish bounding box.
+        // Navigate as the true 2-column grid it visually is: Up/Down between rows, Left/Right
+        // between columns (SetItems auto-detected Columns = 2 from the layout). Tab off — single group.
+        // Earlier this was forced to a flat vertical list, but with Columns = 2 the column-preserving
+        // vertical move only ever walked the left column, leaving the right column (Español, Français,
+        // Português) completely unreachable. A grid matches what a sighted player sees.
         _nav.AllowVertical = true;
-        _nav.AllowHorizontal = false;
+        _nav.AllowHorizontal = true;
         _nav.AllowTab = false;
 
         // selectLanguageTitle is populated by Initialize from the startup-only loc table; just read what's rendered.
@@ -157,5 +160,14 @@ internal sealed class LanguageSelectScreen : IScreenHandler
     {
         var field = typeof(LanguageSelect).GetField("selectLanguageTitle", BindingFlags.Instance | BindingFlags.NonPublic);
         return (field?.GetValue(ls) as TextMeshProUGUI)?.text;
+    }
+
+    // Top-to-bottom, then left-to-right. Same formula the other screen handlers use so the
+    // 2-column grid sorts row-major (English, Español, Italiano, … ) — KeyboardNavigator's
+    // grid math assumes that ordering.
+    private static float ReadingOrder(UnityEngine.Transform t)
+    {
+        var pos = t.position;
+        return -pos.y * 10000 + pos.x;
     }
 }

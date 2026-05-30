@@ -39,6 +39,7 @@ public class Mod : MelonMod
         LocalizationHook.Install(HarmonyInstance, _speech);
         BattleLogHook.Install(HarmonyInstance, _speech);
         FTUEHook.Install(HarmonyInstance);
+        FtueFocusFallback.Install(_router);
 
         LanguageSelectScreen.Install(HarmonyInstance, _router);
         SimpleMessageScreen.Install(HarmonyInstance, _router);
@@ -48,6 +49,9 @@ public class Mod : MelonMod
         ProfessorTooltipScreen.Install(HarmonyInstance, _router);
         DialogueScreen.Install(HarmonyInstance, _router);
         HUBProfileScreen.Install(HarmonyInstance, _router);
+        HUBHomeScreen.Install(HarmonyInstance, _router);
+        HUBShopScreen.Install(HarmonyInstance, _router);
+        ItemGrantScreen.Install(HarmonyInstance, _router);
         AvatarCategoryScreen.Install(HarmonyInstance, _router);
         FTUEBattleIntroScreen.Install(HarmonyInstance, _router);
         BattleScreen.Install(HarmonyInstance, _router);
@@ -61,6 +65,9 @@ public class Mod : MelonMod
         // Handlers that activate via async / coroutine-driven game state poll here each frame.
         ConsentScreen.Poll();
         _router?.Tick();
+        // Global FTUE-focus fallback: surfaces the tutorial's highlighted element on screens we
+        // don't handle yet. No-ops whenever a screen handler is active (checks _router.Active).
+        FtueFocusFallback.Tick();
     }
 
     // Bridge: a screen may have activated / changed state while the user was on a browser

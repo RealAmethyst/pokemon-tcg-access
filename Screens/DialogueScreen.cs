@@ -1,7 +1,10 @@
 using System.Reflection;
 using HarmonyLib;
+using PokemonTCGLiveAccessibility.Hooks;
+using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace PokemonTCGLiveAccessibility.Screens;
 
@@ -29,6 +32,7 @@ internal sealed class DialogueScreen : IScreenHandler
     private DialogueManager? _manager;
     private bool _active;
     private string _lastSpoken = string.Empty;
+    private Selectable? _lastFocusAnnounced;
 
     public string Name => "Dialogue";
 
@@ -80,6 +84,7 @@ internal sealed class DialogueScreen : IScreenHandler
         _instance._router.Deactivate(_instance);
         _instance._manager = null;
         _instance._lastSpoken = string.Empty;
+        _instance._lastFocusAnnounced = null;
     }
 
     public void OnEnter() => AnnounceCurrent();
@@ -106,8 +111,39 @@ internal sealed class DialogueScreen : IScreenHandler
         }
         if (!Application.isFocused) return;
 
-        // Any of Enter / Space / Esc / Backspace advances. Double-call NextSpeaker: the first
-        // call cancels the typewriter animation (or advances if no animation), the second
+        // Coaching-bubble case: an FTUE bubble shown ALONGSIDE a highlighted action button
+        // (e.g. "you can redeem the first tier reward… let's see what you get!" → COLLECT ALL).
+        // The game starts these with exitCondition=false, so DialogueManager.NextSpeaker() is a
+        // no-op — the only way forward is to ACTIVATE the highlighted button. So when the FTUE
+        // has a usable focused element, route Enter/Space to it (and announce it once) instead
+        // of trying to advance the text.
+        //
+        // CRUCIAL: gate this on hasExitCondition == false. A normal *advanceable* welcome/info
+        // bubble (hasExitCondition == true) often has an indicator already pre-focusing the NEXT
+        // step's target; routing Enter to that target would activate it early and re-show the
+        // bubble in a loop. Advanceable bubbles must always advance via NextSpeaker below.
+        var focus = (FTUEHook.FtueIsRunning && !DialogueAdvanceable()) ? FTUEHook.FocusedElement : null;
+        if (IsUsableAction(focus))
+        {
+            if (focus != _lastFocusAnnounced)
+            {
+                _lastFocusAnnounced = focus;
+                _router.Speech.Say(KeyboardNavigator.DefaultLabel(focus!), interrupt: false);
+            }
+            if (UnityEngine.Input.GetKeyDown(KeyCode.Return)
+             || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)
+             || UnityEngine.Input.GetKeyDown(KeyCode.Space))
+            {
+                focus!.Select();
+                if (focus is Button btn) btn.onClick?.Invoke();
+                else if (focus is Toggle tog) tog.isOn = !tog.isOn;
+            }
+            return;
+        }
+        _lastFocusAnnounced = null;
+
+        // Plain dialogue: Enter / Space / Esc / Backspace advances. Double-call NextSpeaker: the
+        // first call cancels the typewriter animation (or advances if no animation), the second
         // advances cleanly. Safe to call twice — canClick gates the second call when needed.
         if (UnityEngine.Input.GetKeyDown(KeyCode.Return)
          || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)
@@ -121,6 +157,23 @@ internal sealed class DialogueScreen : IScreenHandler
             _manager?.NextSpeaker();
             _manager?.NextSpeaker();
         }
+    }
+
+    // A focused element we can drive: active, interactable, and a Button/Toggle (so Enter has a
+    // meaningful effect). focusOnly highlights and other non-interactive targets are excluded.
+    private static bool IsUsableAction(Selectable? s)
+        => s != null && s.isActiveAndEnabled && s.IsInteractable() && (s is Button || s is Toggle);
+
+    // True when the current dialogue advances on click (started with exitCondition=true — the
+    // common welcome/info bubbles, whose NextSpeaker fires the FTUE animator's NextState). False
+    // for coaching bubbles (exitCondition=false) that stay until the player performs a highlighted
+    // action. Read from the game's own flag. Defaults to true if unreadable, so we never hijack
+    // Enter away from a normal advanceable dialogue.
+    private bool DialogueAdvanceable()
+    {
+        if (_manager == null) return true;
+        var f = typeof(DialogueManager).GetField("hasExitCondition", BindingFlags.Instance | BindingFlags.NonPublic);
+        return f?.GetValue(_manager) is bool b ? b : true;
     }
 
     private void AnnounceCurrent()
