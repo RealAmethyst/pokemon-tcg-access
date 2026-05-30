@@ -23,7 +23,7 @@ namespace PokemonTCGLiveAccessibility.Navigation;
 //   - Items hidden behind another raycast target (modal overlay, blocker panel) are skipped:
 //     uGUI's own raycast tells us when a button isn't actually clickable right now.
 //   - Window-focus gate: we don't read keys when the game window isn't focused.
-internal sealed class KeyboardNavigator
+internal sealed class KeyboardNavigator : INavSection
 {
     public delegate string LabelResolver(Selectable s);
 

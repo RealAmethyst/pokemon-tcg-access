@@ -38,10 +38,19 @@ internal sealed class HUBHomeScreen : IScreenHandler
     private static HUBHomeScreen? _instance;
 
     private readonly ScreenRouter _router;
-    private readonly List<KeyboardNavigator> _groups = new();
+    private readonly List<INavSection> _groups = new();
     private int _activeGroup = -1;
     private HUBPlayScreenController? _controller;
     private bool _active;
+
+    // The LEARN game-mode tab's content is the Learning Lab lesson list — built as a section
+    // (drill-down over the lesson data) whenever it's showing, so Down from the tabs / Enter on
+    // the active LEARN tab steps into it and Up returns to the tabs. _pendingEnterContent records
+    // an Enter-on-LEARN whose list is still loading (async) so we dive in once it appears.
+    private LearningLabSection? _llSection;
+    private bool _pendingEnterContent;
+    private string _lastContentSig = string.Empty;
+    private PageDragTab[]? _modeTabs;
 
     private bool _hasAnnouncedAtAll;
     private string _structureAtPause = string.Empty;
@@ -58,6 +67,9 @@ internal sealed class HUBHomeScreen : IScreenHandler
     {
         _router = router;
         _instance = this;
+        // A drill-in / back inside the Learning Lab re-runs SetupDisplay; forward it to the live
+        // section so it re-reads the new level.
+        LearningLabSection.LevelChanged += OnLearningLabLevelChanged;
     }
 
     public static void Install(HarmonyLib.Harmony harmony, ScreenRouter router)
@@ -184,11 +196,22 @@ internal sealed class HUBHomeScreen : IScreenHandler
             }
             return;
         }
-        if (_groups.Count == 0) return;
         if (!Application.isFocused) return;
+
+        // React to a game-mode tab switch / the Learning Lab loading or hiding: the content
+        // section changes, so rebuild and (if the user just picked LEARN) drop into the lessons.
+        // Gated off during FTUE, where focus is tutorial-driven (RebuildForFtue).
+        if (!FTUEHook.FtueIsRunning)
+        {
+            var sig = ContentSig();
+            if (sig != _lastContentSig) { _lastContentSig = sig; OnContentChanged(); return; }
+        }
+
+        if (_groups.Count == 0) return;
 
         if (UnityEngine.Input.GetKeyDown(KeyCode.Tab))
         {
+            _pendingEnterContent = false;
             if (_groups.Count > 1)
             {
                 var shift = UnityEngine.Input.GetKey(KeyCode.LeftShift) || UnityEngine.Input.GetKey(KeyCode.RightShift);
@@ -200,20 +223,44 @@ internal sealed class HUBHomeScreen : IScreenHandler
 
         // Section escape: groups are built in visual top-to-bottom order. Up at the top row of
         // a group jumps to the section above and lands on its bottom row (preserving column);
-        // Down at the bottom row jumps to the section below and lands on its top row.
+        // Down at the bottom row jumps to the section below and lands on its top row. Escaping
+        // *into* the game-mode tabs lands on the currently-active mode (not always the first tab).
         var nav = _groups[_activeGroup];
         if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow) && _activeGroup > 0 && nav.IsAtTopRow)
         {
+            _pendingEnterContent = false;
             var col = nav.CurrentColumn;
             _activeGroup--;
-            _groups[_activeGroup].FocusLastRow(preferredColumn: col, announce: true, interruptPrior: true);
+            if (_activeGroup == _tabGroupIndex) FocusActiveTab(announce: true);
+            else _groups[_activeGroup].FocusLastRow(preferredColumn: col, announce: true, interruptPrior: true);
             return;
         }
         if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow) && _activeGroup < _groups.Count - 1 && nav.IsAtBottomRow)
         {
+            _pendingEnterContent = false;
             var col = nav.CurrentColumn;
             _activeGroup++;
             _groups[_activeGroup].FocusFirstRow(preferredColumn: col, announce: true, interruptPrior: true);
+            return;
+        }
+
+        // On the game-mode tabs, Enter dives into that tab's content rather than just re-speaking:
+        //  - already on the LEARN tab with the list showing → step straight into the lessons;
+        //  - on any other tab → select the mode (radio); if it turns out to be LEARN, the list
+        //    loads async and the content-change handler above dives in when it appears.
+        bool enter = UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter);
+        if (_activeGroup == _tabGroupIndex && enter && nav is KeyboardNavigator tabsNav)
+        {
+            var cur = tabsNav.Current as Toggle;
+            bool wasOn = cur != null && cur.isOn;
+            if (wasOn && LearningLabSection.IsShowing && _mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count)
+            {
+                _activeGroup = _mainGroupIndex;
+                _groups[_activeGroup].FocusFirstRow(announce: true, interruptPrior: true);
+                return;
+            }
+            tabsNav.Activate(isSpaceKey: false);
+            _pendingEnterContent = !wasOn;   // a fresh selection; resolved (dive) only if it's LEARN
             return;
         }
 
@@ -245,9 +292,11 @@ internal sealed class HUBHomeScreen : IScreenHandler
         _groups.Clear();
         _tabGroupIndex = -1;
         _mainGroupIndex = -1;
-        if (_controller == null) return;
+        _llSection = null;
+        if (_controller == null) { _lastContentSig = ContentSig(); return; }
 
         var gmc = ReadField<HUBGameModeController>(_controller, "gameModeController");
+        _modeTabs = gmc != null ? gmc.GetComponentsInChildren<PageDragTab>(includeInactive: false) : null;
         var known = new HashSet<Selectable>();
 
         // --- Group 1: HUB top tab strip + overflow "⋮" button (top bar, HUBTopController_L). ---
@@ -309,38 +358,50 @@ internal sealed class HUBHomeScreen : IScreenHandler
             if (bottom != null && bottom.activeInHierarchy) bottomT = bottom.transform;
         }
 
-        // --- Group 3: main content (PLAY + carousel arrows + anything else). ---
-        // Sweep the play screen and the game-mode controller (it may be a sibling rather than a
-        // child), plus belt-and-suspenders lookups for the PLAY button, which is wired on
-        // HUBRankedController and parented under HUBGameModeController.PlayButtonContainer.
-        var candidates = new List<Selectable>();
-        candidates.AddRange(_controller.GetComponentsInChildren<Selectable>(includeInactive: false));
-        if (gmc != null)
-            candidates.AddRange(gmc.GetComponentsInChildren<Selectable>(includeInactive: false));
-        var playContainer = gmc != null ? ReadField<GameObject>(gmc, "PlayButtonContainer") : null;
-        if (playContainer != null && playContainer.activeInHierarchy)
-            candidates.AddRange(playContainer.GetComponentsInChildren<Selectable>(includeInactive: false));
-        var ranked = Object.FindAnyObjectByType<HUBRankedController>();
-        if (ranked != null)
+        // --- Group 3: main content. ---
+        // Under the LEARN tab the content is the Learning Lab lesson list, which is a drill-down
+        // over the lesson data (not standard Selectables), so it gets its own section type.
+        // Otherwise it's the normal sweep: PLAY + carousel arrows + anything else.
+        if (LearningLabSection.IsShowing)
         {
-            var play = ReadField<Button>(ranked, "playButton");
-            if (play != null) candidates.Add(play);
-        }
-
-        var main = candidates
-            .Where(s => s != null)
-            .Distinct()
-            .Where(s => !known.Contains(s))
-            .Where(s => s is Button || s is Toggle)
-            .Where(s => s.isActiveAndEnabled)
-            .Where(s => bottomT == null || !s.transform.IsChildOf(bottomT))
-            .OrderBy(s => ReadingOrder(s.transform))
-            .ToList();
-        if (main.Count > 0)
-        {
-            foreach (var s in main) known.Add(s);
-            AddGroup(main);
+            _llSection = new LearningLabSection(_router.Speech, EscapeFromLearningLabToTabs);
+            _groups.Add(_llSection);
             _mainGroupIndex = _groups.Count - 1;
+        }
+        else
+        {
+            // Sweep the play screen and the game-mode controller (it may be a sibling rather than
+            // a child), plus belt-and-suspenders lookups for the PLAY button, which is wired on
+            // HUBRankedController and parented under HUBGameModeController.PlayButtonContainer.
+            var candidates = new List<Selectable>();
+            candidates.AddRange(_controller.GetComponentsInChildren<Selectable>(includeInactive: false));
+            if (gmc != null)
+                candidates.AddRange(gmc.GetComponentsInChildren<Selectable>(includeInactive: false));
+            var playContainer = gmc != null ? ReadField<GameObject>(gmc, "PlayButtonContainer") : null;
+            if (playContainer != null && playContainer.activeInHierarchy)
+                candidates.AddRange(playContainer.GetComponentsInChildren<Selectable>(includeInactive: false));
+            var ranked = Object.FindAnyObjectByType<HUBRankedController>();
+            if (ranked != null)
+            {
+                var play = ReadField<Button>(ranked, "playButton");
+                if (play != null) candidates.Add(play);
+            }
+
+            var main = candidates
+                .Where(s => s != null)
+                .Distinct()
+                .Where(s => !known.Contains(s))
+                .Where(s => s is Button || s is Toggle)
+                .Where(s => s.isActiveAndEnabled)
+                .Where(s => bottomT == null || !s.transform.IsChildOf(bottomT))
+                .OrderBy(s => ReadingOrder(s.transform))
+                .ToList();
+            if (main.Count > 0)
+            {
+                foreach (var s in main) known.Add(s);
+                AddGroup(main);
+                _mainGroupIndex = _groups.Count - 1;
+            }
         }
 
         // --- Group 4: bottom shortcuts (Profile / Decks / Card Dex). ---
@@ -355,6 +416,8 @@ internal sealed class HUBHomeScreen : IScreenHandler
             if (bottomItems.Count > 0)
                 AddGroup(bottomItems);
         }
+
+        _lastContentSig = ContentSig();
     }
 
     // FTUE has highlighted a specific button on this screen: collapse to a single-item nav of
@@ -366,6 +429,13 @@ internal sealed class HUBHomeScreen : IScreenHandler
         _activeGroup = -1;
         _tabGroupIndex = -1;
         _mainGroupIndex = -1;
+        _llSection = null;
+
+        // Keep the content signature current (the game-mode tabs persist) so leaving FTUE doesn't
+        // trigger a spurious content-change rebuild on the first normal tick.
+        var gmc = _controller != null ? ReadField<HUBGameModeController>(_controller, "gameModeController") : null;
+        _modeTabs = gmc != null ? gmc.GetComponentsInChildren<PageDragTab>(includeInactive: false) : null;
+        _lastContentSig = ContentSig();
 
         var target = FTUEHook.FocusedElement;
         _lastFtueTarget = target;
@@ -383,6 +453,73 @@ internal sealed class HUBHomeScreen : IScreenHandler
         if (_tabGroupIndex >= 0 && _tabGroupIndex < _groups.Count) return _tabGroupIndex;
         if (_mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count) return _mainGroupIndex;
         return 0;
+    }
+
+    // ---- Learning Lab / content-change integration -----------------------------------------
+
+    // Signature of "what content section should exist": the active game-mode tab + whether the
+    // Learning Lab list is showing. Changes only on a tab switch or the LL loading/hiding —
+    // discrete events — so comparing it each tick is a cheap, alloc-free way to know when to
+    // rebuild the section list. Reads the cached PageDragTab refs (valid for the screen's life).
+    private string ContentSig()
+    {
+        var tab = "none";
+        if (_modeTabs != null)
+            foreach (var pdt in _modeTabs)
+                if (pdt != null && pdt.toggle != null && pdt.toggle.isOn) { tab = pdt.gameObject.name; break; }
+        return tab + "|" + (LearningLabSection.IsShowing ? "LL" : "-");
+    }
+
+    // The game-mode tab changed (or the Learning Lab finished loading / hid). Rebuild the section
+    // list so the content section matches, then either dive into the lessons (if the user just
+    // entered LEARN — _pendingEnterContent) or keep them where they were, silently.
+    private void OnContentChanged()
+    {
+        int prev = _activeGroup;
+        RebuildGroups();
+        if (_groups.Count == 0) { _activeGroup = -1; return; }
+        _activeGroup = Mathf.Clamp(prev < 0 ? PickDefaultGroup() : prev, 0, _groups.Count - 1);
+
+        if (_pendingEnterContent && LearningLabSection.IsShowing && _mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count)
+        {
+            _pendingEnterContent = false;
+            _activeGroup = _mainGroupIndex;
+            _groups[_activeGroup].FocusFirstRow(announce: true, interruptPrior: true);
+            return;
+        }
+        // Don't clear _pendingEnterContent here: an Enter-on-LEARN sees an intermediate rebuild
+        // (LEARN selected, list not yet loaded) before the list appears; clearing now would drop
+        // the dive. Any explicit navigation (Tab / arrows) clears it instead.
+        if (_activeGroup == _tabGroupIndex) FocusActiveTab(announce: false);
+        else _groups[_activeGroup].RefocusCurrent(announce: false);
+    }
+
+    // Focus the currently-selected game-mode tab (the toggle that's on), so escaping up into the
+    // tab strip — or rebuilding after a switch — lands on the active mode rather than the first tab.
+    private void FocusActiveTab(bool announce)
+    {
+        if (_tabGroupIndex < 0 || _tabGroupIndex >= _groups.Count) return;
+        if (_groups[_tabGroupIndex] is not KeyboardNavigator kn) { _groups[_tabGroupIndex].FocusFirst(announce); return; }
+        for (int i = 0; i < kn.Items.Count; i++)
+            if (kn.Items[i] is Toggle t && t.isOn) { kn.FocusIndex(i, announce: announce, interrupt: true); return; }
+        kn.FocusFirst(announce);
+    }
+
+    // The Learning Lab section, at its top level, hands "back" up to the game-mode tabs.
+    private void EscapeFromLearningLabToTabs()
+    {
+        if (_tabGroupIndex < 0 || _tabGroupIndex >= _groups.Count) return;
+        _activeGroup = _tabGroupIndex;
+        FocusActiveTab(announce: true);
+    }
+
+    // A drill-in / back inside the lessons re-ran SetupDisplay — if the lessons are the active
+    // section, re-read the new level.
+    private void OnLearningLabLevelChanged()
+    {
+        if (!_active || _llSection == null) return;
+        if (_activeGroup >= 0 && _activeGroup < _groups.Count && ReferenceEquals(_groups[_activeGroup], _llSection))
+            _llSection.OnLevelChanged();
     }
 
     private void AddGroup(List<Selectable> items, KeyboardNavigator.LabelResolver? resolver = null,
