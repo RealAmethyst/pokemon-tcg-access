@@ -63,6 +63,7 @@ public class Mod : MelonMod
         FTUEBattleIntroScreen.Install(HarmonyInstance, _router);
         BattleScreen.Install(HarmonyInstance, _router);
         BattlePromptScreen.Install(HarmonyInstance, _router);
+        BattleSettingsScreen.Install(_router);
     }
 
     public override void OnUpdate()

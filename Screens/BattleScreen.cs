@@ -75,6 +75,15 @@ internal sealed class BattleScreen : IScreenHandler
     private MatchManager? _selSubManager;   // manager we've hooked SelectionStateChanged on
     private HandController? _handSub;        // local hand we've hooked OnCardAdded/OnCardRemoved on
 
+    // An active attach-distribution selection (e.g. Oricorio ex Excited Turbo: "attach Basic Fire Energy
+    // to your Benched Fire Pokémon"). It's a placement, not a list — so instead of a mod overlay the
+    // player attaches with the NORMAL board drag: pick up a hand energy (Enter in your hand), navigate to
+    // a benched Pokémon (B + arrows), Enter to drop; Tab = Done. Set by BattlePromptScreen, which gives
+    // the attach selection NO overlay. Everything below is gated on this being non-null, so normal play
+    // and all other prompts are byte-for-byte unchanged.
+    private AttachmentDistributionSelectionMenu? _attachSel;
+    private static System.Reflection.MethodInfo? _attachCompleteMethod;
+
     // Tutorial guidance: the entityID of the FTUE-spotlighted card we last announced.
     private string _ftueCardId = "";
 
@@ -286,6 +295,8 @@ internal sealed class BattleScreen : IScreenHandler
             if (_active) { _active = false; _router.Deactivate(this); }
             return;
         }
+        // The attach-distribution selection resolved/closed → leave attach mode.
+        if (_attachSel != null && !_attachSel.isOpen) EndAttach();
         if (!Application.isFocused) return;
 
         bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
@@ -309,6 +320,21 @@ internal sealed class BattleScreen : IScreenHandler
 
         // While holding a picked-up card, Backspace cancels the drag and returns it to hand.
         if (_holding && Input.GetKeyDown(KeyCode.Backspace)) { CancelPickup(); return; }
+
+        // Escape opens the battle menu (settings + Concede) — the panel the gear icon shows. We only
+        // reach here with the field clear: selection prompts push their own handler over us, and the
+        // big-card viewer was handled just above. Not while holding a card (Backspace cancels that).
+        if (Input.GetKeyDown(KeyCode.Escape) && !_holding && BattleSettingsScreen.TryOpen()) return;
+
+        // Attach-distribution: Tab = Done (finish attaching). The screen-space message-bar Done usually
+        // drives it; if it isn't present, invoke the menu's own complete directly so the player can
+        // always finish.
+        if (_attachSel != null && Input.GetKeyDown(KeyCode.Tab))
+        {
+            if (MessageBarDoneAvailable()) PressMessageBarDone();
+            else FinishAttach();
+            return;
+        }
 
         // A "Done" / confirm button on the screen-space message bar (e.g. confirm your starting
         // Pokémon at setup) — announce it once when it appears, and press it with TAB (NOT Enter, so
@@ -352,6 +378,17 @@ internal sealed class BattleScreen : IScreenHandler
         _zone = z; _card = 0; _line = -1;
         string zoneName = BattleBoardReader.ZoneName(z);
 
+        // During an attach-distribution, C (your hand) shows the menu's attach energies — the game lifts
+        // them into a temporary hand, NOT your real hand — so you handle the energy then press B to drop
+        // it on a Pokémon. The energies read by their localized card name; the zone label is a mod string.
+        if (_attachSel != null && z == BattleBoardReader.Zone.MyHand)
+        {
+            _zoneCards = AttachEnergyCards();
+            if (_zoneCards.Count == 0) { _router.Speech.Say("No energy left to attach", interrupt: true); return; }
+            _router.Speech.Say($"Energy to attach, {AttachEnergyCount()} available. {CardLabel(0)}", interrupt: true);
+            return;
+        }
+
         if (BattleBoardReader.IsCountOnly(z))
         {
             _zoneCards = null;
@@ -370,7 +407,8 @@ internal sealed class BattleScreen : IScreenHandler
         var card = _zoneCards![i];
         string name = BattleBoardReader.CardNameWithType(card);
         // In the hand, a pile of identical cards reads as one entry — speak its count like the badge.
-        if (_zone == BattleBoardReader.Zone.MyHand)
+        // (Not for the attach temp hand: its total is announced in the zone label instead.)
+        if (_zone == BattleBoardReader.Zone.MyHand && _attachSel == null)
         {
             int n = BattleBoardReader.HandStackCount(_manager!, card);
             if (n > 1) name += $", {n} copies";
@@ -383,7 +421,9 @@ internal sealed class BattleScreen : IScreenHandler
     private void RefreshZoneCards()
     {
         if (_manager == null || _zoneCards == null || BattleBoardReader.IsCountOnly(_zone)) return;
-        _zoneCards = BattleBoardReader.GetCards(_manager, _zone);
+        _zoneCards = (_attachSel != null && _zone == BattleBoardReader.Zone.MyHand)
+            ? AttachEnergyCards()
+            : BattleBoardReader.GetCards(_manager, _zone);
         _card = _zoneCards.Count == 0 ? 0 : Mathf.Clamp(_card, 0, _zoneCards.Count - 1);
         _line = -1;
     }
@@ -614,7 +654,17 @@ internal sealed class BattleScreen : IScreenHandler
 
     private void OpenActionMenu()
     {
-        Log.Info($"OpenActionMenu entry: zone={_zone} card={_card}/{_zoneCards?.Count ?? -1} localSel={_localSelecting} holding={_holding} mode={_mode}");
+        Log.Info($"OpenActionMenu entry: zone={_zone} card={_card}/{_zoneCards?.Count ?? -1} localSel={_localSelecting} holding={_holding} mode={_mode} attach={_attachSel != null}");
+        // Attach-distribution selection active: Enter on a hand energy picks it up to attach (the drop
+        // onto a Pokémon goes through AttemptDrop). This is BEFORE the _localSelecting block because the
+        // attach IS the pending selection — it's fulfilled by this drag, not blocked by it.
+        if (_attachSel != null)
+        {
+            if (_zoneCards != null && _card >= 0 && _card < _zoneCards.Count && _zoneCards[_card] != null)
+                AttachPickup(_zoneCards[_card]);
+            else _router.Speech.Say("Select an energy from your hand", interrupt: true);
+            return;
+        }
         // While the game is waiting on a local selection, starting a new action would desync — block it.
         if (_localSelecting)
         { _router.Speech.Say("Finish the current selection first", interrupt: true); return; }
@@ -953,6 +1003,17 @@ internal sealed class BattleScreen : IScreenHandler
     private (ICardPlacementReceiver? recv, string desc) ComputeDropTarget()
     {
         if (_heldCard == null || _manager == null) return (null, "");
+
+        // Attach-distribution: the receiver is the focused board Pokémon, if the attach permits it
+        // (ValidPlacementReceivers). The attach menu's placement context attaches the held energy onto it.
+        if (_attachSel != null)
+        {
+            var focusedP = (_zoneCards != null && _card >= 0 && _card < _zoneCards.Count) ? _zoneCards[_card] : null;
+            if (focusedP is ICardPlacementReceiver afr && IsAttachReceiver(focusedP))
+                return (afr, "Attached to " + BattleBoardReader.CardName(focusedP));
+            return (null, "");
+        }
+
         var info = _heldCard.cardInfo;
         if (info == null) return (null, "");
 
@@ -1007,6 +1068,111 @@ internal sealed class BattleScreen : IScreenHandler
         _holding = false;
         _heldCard = null;
         _router.Speech.Say(held != null ? $"Cancelled {BattleBoardReader.CardName(held)}" : "Cancelled", interrupt: true);
+    }
+
+    // ---- Attach-distribution (e.g. Oricorio ex Excited Turbo) handled via the normal board drag ----
+    // BattlePromptScreen routes this selection here instead of opening a mod overlay: the player attaches
+    // energy exactly like on their turn — pick up a hand energy, navigate to a benched Pokémon, drop;
+    // Tab = Done. All of this is gated on _attachSel, so normal play / other prompts are untouched.
+
+    // Called by BattlePromptScreen when the attach selection opens. Announce the game's prompt; the
+    // player then uses C (hand) → Enter to grab an energy → B → drop on a Pokémon → Tab to finish.
+    public static void BeginAttachSelection(AttachmentDistributionSelectionMenu menu, string question)
+    {
+        if (_instance == null || menu == null) return;
+        _instance._attachSel = menu;
+        _instance._holding = false;
+        _instance._heldCard = null;
+        if (!string.IsNullOrWhiteSpace(question)) _instance._router.Speech.Say(question, interrupt: true);
+        Log.Info("BattleScreen: attach-distribution selection — using board drag");
+    }
+
+    private void EndAttach()
+    {
+        _attachSel = null;
+        if (_holding)
+        {
+            try { _manager?.TargetingHandler.ClearTarget(); } catch { }
+            _placeInit.Reset();
+            _holding = false;
+            _heldCard = null;
+        }
+    }
+
+    // Pick up a hand energy to attach. Leaves the attach menu's placement context active (does NOT switch
+    // to the idle context), so TryTargetCard routes the energy through the menu's AttachCardToOtherCard
+    // purpose; the handler itself rejects a card that can't be attached.
+    private void AttachPickup(Card3D card)
+    {
+        if (_attachSel == null || _manager == null || card == null) return;
+        _placeInit.Reset();
+        if (!_manager.TargetingHandler.TryTargetCard(card, _placeInit))
+        { _router.Speech.Say($"Can't attach {BattleBoardReader.CardName(card)}", interrupt: true); return; }
+        _holding = true;
+        _heldCard = card;
+        _router.Speech.Say($"Holding {BattleBoardReader.CardName(card)}", interrupt: true);
+    }
+
+    // Is the focused board card a Pokémon the held energy may attach to (per the attach menu's own rule)?
+    private bool IsAttachReceiver(Card3D c)
+    {
+        if (_attachSel == null || _heldCard == null || c == null) return false;
+        try { return _attachSel.ValidPlacementReceivers(_heldCard).Any(r => ReferenceEquals(r, c)); }
+        catch { return false; }
+    }
+
+    // Finish the attach step via the menu's own CompleteReparentingAction (what its Done button calls) —
+    // the fallback when the screen-space message-bar Done isn't what's driving it.
+    private void FinishAttach()
+    {
+        var menu = _attachSel;
+        if (menu == null) return;
+        try
+        {
+            _attachCompleteMethod ??= typeof(AttachmentDistributionSelectionMenu).GetMethod(
+                "CompleteReparentingAction", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (_attachCompleteMethod != null)
+            {
+                var pType = _attachCompleteMethod.GetParameters()[0].ParameterType;   // AutoSubmitReason
+                _attachCompleteMethod.Invoke(menu, new object[] { Enum.ToObject(pType, 0) });
+            }
+        }
+        catch (Exception ex) { Log.Error($"BattleScreen: attach Done threw: {ex.Message}"); }
+        EndAttach();
+    }
+
+    // The menu's temporary hand (a ReparentHandController : HandController) holding the attachable
+    // energies. Private on the menu → reflected. This is where the energies live during the attach, NOT
+    // board.GetPlayer(LOCAL).hand — so C reads from here while _attachSel is set.
+    private static System.Reflection.FieldInfo? _tempHandField;
+    private HandController? AttachHand()
+    {
+        if (_attachSel == null) return null;
+        try
+        {
+            _tempHandField ??= typeof(AttachmentDistributionSelectionMenu).GetField(
+                "tempHand", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            return _tempHandField?.GetValue(_attachSel) as HandController;
+        }
+        catch (Exception ex) { Log.Error($"BattleScreen: attach tempHand read threw: {ex.Message}"); return null; }
+    }
+
+    // The attach energies as navigable cards (stacked pile tops, like the real hand). Pickup peels the top.
+    private List<Card3D> AttachEnergyCards()
+    {
+        var hand = AttachHand();
+        if (hand == null) return new List<Card3D>();
+        try { return hand.GetCardsAccessibleForTargeting().Where(c => c != null).ToList(); }
+        catch (Exception ex) { Log.Error($"BattleScreen: attach hand cards threw: {ex.Message}"); return new List<Card3D>(); }
+    }
+
+    // How many energies are still available to attach (total, across the pile) — for the "N available" label.
+    private int AttachEnergyCount()
+    {
+        var hand = AttachHand();
+        if (hand == null) return 0;
+        try { return hand.GetOwnedCards().Count(c => c != null); }
+        catch { return AttachEnergyCards().Count; }
     }
 
     // No-target play (Item / Trainer / Supporter): drive the game's targeting handler to drop the

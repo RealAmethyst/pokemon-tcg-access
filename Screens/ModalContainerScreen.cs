@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
+using PokemonTCGLiveAccessibility.Hooks;
 using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
 using TMPro;
@@ -84,13 +85,7 @@ internal sealed class ModalContainerScreen : IScreenHandler
         var title = ReadTmpText(titleText) ?? "";
         _router.SetCurrentTitle(this, title);
 
-        var bodyText = string.Join(". ",
-            _modal.GetComponentsInChildren<TMP_Text>(includeInactive: false)
-                .Where(t => !string.IsNullOrWhiteSpace(t.text))
-                .Where(t => t.GetComponentInParent<Selectable>() == null)
-                .Where(t => titleText == null || t.gameObject != titleText.gameObject)
-                .OrderBy(t => ReadingOrder(t.transform))
-                .Select(t => t.text.Trim()));
+        var bodyText = BuildBodyText(titleText);
 
         var description = BuildPreamble(title, bodyText);
 
@@ -157,13 +152,7 @@ internal sealed class ModalContainerScreen : IScreenHandler
         if (_modal == null || _groups.Count == 0) return;
         var titleText = ReadField<LocText>(_modal, "titleText");
         var title = ReadTmpText(titleText) ?? "";
-        var bodyText = string.Join(". ",
-            _modal.GetComponentsInChildren<TMP_Text>(includeInactive: false)
-                .Where(t => !string.IsNullOrWhiteSpace(t.text))
-                .Where(t => t.GetComponentInParent<Selectable>() == null)
-                .Where(t => titleText == null || t.gameObject != titleText.gameObject)
-                .OrderBy(t => ReadingOrder(t.transform))
-                .Select(t => t.text.Trim()));
+        var bodyText = BuildBodyText(titleText);
         var description = BuildPreamble(title, bodyText);
         if (!string.IsNullOrWhiteSpace(description))
             _router.Speech.Say(description!, interrupt: true);
@@ -210,6 +199,57 @@ internal sealed class ModalContainerScreen : IScreenHandler
         if (titleRedundant) return string.IsNullOrWhiteSpace(body) ? title : body;
         if (string.IsNullOrWhiteSpace(body)) return title;
         return $"{title}. {body}";
+    }
+
+    // The modal's message text, gathered from two sources and deduped by GameObject:
+    //  1. Plain TMP children of the container — excludes button labels via the Selectable-ancestor filter.
+    //  2. The modal's CurrentOptions — the spawned message options (SimpleMessageModalOption, etc.). The
+    //     match-action confirmations ("you still have selections", concede warning) put their body in such
+    //     an option, and the container scan misses it because the whole modal sits under the blocker
+    //     Button, so every text reads as "under a Selectable". For PASSIVE options (no Selectable on the
+    //     option root = not a button/toggle) we take the text directly, ignoring that ancestor filter; if
+    //     a LocText hasn't pushed to its TMP yet we resolve it from CurrentText / its resourceId.
+    private string BuildBodyText(LocText? titleText)
+    {
+        if (_modal == null) return "";
+        var seen = new HashSet<int>();
+        var parts = new List<(float order, string text)>();
+
+        void Consider(TMP_Text t, bool allowUnderSelectable)
+        {
+            if (t == null) return;
+            if (titleText != null && t.gameObject == titleText.gameObject) return;
+            // Filter BEFORE marking seen: the container pass (allowUnderSelectable:false) rejects a
+            // message that sits under the blocker Button, and the CurrentOptions pass must still be able
+            // to pick it up — so a rejected text must NOT be recorded as already-seen.
+            if (!allowUnderSelectable && t.GetComponentInParent<Selectable>() != null) return;
+            if (!seen.Add(t.GetInstanceID())) return;
+            string txt = t.text;
+            if (string.IsNullOrWhiteSpace(txt))
+            {
+                var loc = t.GetComponent<LocText>();
+                if (loc != null)
+                {
+                    txt = loc.CurrentText;
+                    if (string.IsNullOrWhiteSpace(txt) && !string.IsNullOrEmpty(loc.resourceId))
+                        txt = LocalizationHook.Get(loc.resourceId) ?? "";
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(txt)) parts.Add((ReadingOrder(t.transform), txt.Trim()));
+        }
+
+        foreach (var t in _modal.GetComponentsInChildren<TMP_Text>(includeInactive: false))
+            Consider(t, allowUnderSelectable: false);
+
+        if (_modal.CurrentOptions != null)
+            foreach (var opt in _modal.CurrentOptions)
+            {
+                if (opt == null || opt.GetComponent<Selectable>() != null) continue;   // skip buttons / toggles
+                foreach (var t in opt.GetComponentsInChildren<TMP_Text>(includeInactive: true))
+                    Consider(t, allowUnderSelectable: true);
+            }
+
+        return string.Join(". ", parts.OrderBy(p => p.order).Select(p => p.text));
     }
 
     private static T? ReadField<T>(ModalElementContainer modal, string name) where T : class

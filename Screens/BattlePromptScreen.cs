@@ -30,16 +30,29 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     // One navigable choice. Eid is the entity-selection card id (so the label can show ", selected"
     // by reading the game's own SelectionGroup.selectedOptions); null for prize / text options.
+    // Card is the resolved Card3D for prize options (their selected-state lives in a private list,
+    // not a SelectionGroup, so ", selected" is read by membership). IsDone marks the synthetic
+    // "Done" entry that submits a multi-pick selection.
     private sealed class Option
     {
         public string Name = "";
         public Action Choose = () => { };
         public string? Eid;
+        public Card3D? Card;
+        public bool IsDone;
+        // The Pokémon this card is attached to (energy-discard menus). Spoken as a SECTION NAME — only
+        // when it differs from the previously-focused option — so consecutive energy on the same Pokémon
+        // doesn't repeat it. Null for cards with no parent (prizes, hand/deck cards).
+        public string? Parent;
+        // For a COLLAPSED carousel/pile stack (e.g. 18 identical Basic Fire Energy shown as one pile):
+        // the entityIDs in the pile, used for the live available/selected counts. Null = not a stack.
+        public List<string>? StackEids;
     }
 
     private ISelectionRequestHandler? _handler;   // the open overlay (also a BattleMenu)
     private string _question = "";
     private readonly List<Option> _options = new();
+    private string? _lastSpokenParent;  // last announced section (parent Pokémon) — see SpeakOption
     private int _idx;
     private int _line = -1;        // detail-line cursor on the focused card option (-1 = on the header/name)
     private List<string>? _lines;  // cached detail lines for the focused option; null until first Up/Down resolves it
@@ -49,12 +62,26 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private SelectionGroup? _entityGroup;
     private EntitySelection? _entitySel;
     private EntitySelectionOverlay? _entityOverlay;
+    private BoardAttachedCardSelectionMenu? _bacsMenu;   // multi-parent attached select (distribute-then-select)
+    private bool _entityClickMenu;   // board-attached / attached: select the specific board card by entityID
+    private int _entityMin;
+    private int _entityMax;
+    // Board-attached deferred select: after we distribute an energy's parent Pokémon (a native click on
+    // it), the energy only becomes selectable once it settles into the distribution carousel — so we
+    // finish the select over the next ticks. eid of the energy we're waiting to select, "" when idle.
+    private string _pendingSelectEid = "";
+    private string _pendingSelectParent = "";   // the energy's parent Pokémon we must "distribute" (open) to reach it
+    private int _pendingSelectTicks;
+    private PrizeCardSelectionMenu? _prizeMenu;
+    private int _prizeMin;
+    private int _prizeMax;
     private BoardSelectionMenu? _boardMenu;
     private SelectionGroup? _boardGroup;
     private ActivePromotionDragMenu? _dragMenu;
     private SelectionGroup? _dragGroup;
     private AttachmentDistributionSelectionMenu? _attachMenu;
     private ReparentSelection? _reparentSel;
+    private string? _attachEnergyName;   // attach menu phase 2: which energy type the player chose to place
     private ReparentDamageMenu? _damageMenu;
     private DamageSelection? _damageSel;
     private int _damagePlaced;        // counters (tens) assigned so far this damage prompt
@@ -97,6 +124,19 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     private void OnPromptOpened(PlayerSelection sel, ISelectionRequestHandler? handler)
     {
+        // Attach-distribution ("attach energy onto a Pokémon") is a placement, not a list — so no mod
+        // overlay. Hand it to the field handler: the game lifts the energies into a temporary hand, and
+        // BattleScreen points C (your hand) at THAT temp hand, so you pick the energy, press B, and drop
+        // it on the Pokémon — the same native board drag as attaching on your turn. Tab = Done.
+        if (handler is AttachmentDistributionSelectionMenu attachMenu)
+        {
+            string q = "";
+            try { q = attachMenu.DynamicStringProvider.UpdateSelectionLocStrings(sel.variableSelection.GetLocId(), sel.variableSelection.locParams) ?? ""; }
+            catch { }
+            BattleScreen.BeginAttachSelection(attachMenu, q);
+            return;
+        }
+
         BuildPrompt(sel, handler);
 
         if (_options.Count == 0)
@@ -118,6 +158,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
     {
         _handler = handler;
         _options.Clear();
+        _lastSpokenParent = null;
         _idx = 0;
         _line = -1;
         _lines = null;
@@ -127,6 +168,16 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _entityGroup = null;
         _entitySel = null;
         _entityOverlay = null;
+        _bacsMenu = null;
+        _entityClickMenu = false;
+        _entityMin = 0;
+        _entityMax = 0;
+        _pendingSelectEid = "";
+        _pendingSelectParent = "";
+        _pendingSelectTicks = 0;
+        _prizeMenu = null;
+        _prizeMin = 0;
+        _prizeMax = 0;
         _boardMenu = null;
         _boardGroup = null;
         _dragMenu = null;
@@ -171,13 +222,22 @@ internal sealed class BattlePromptScreen : IScreenHandler
         {
             var vs = sel.variableSelection;
             string groups = "n/a";
+            string extra = "";
             if (vs is EntitySelection es && es.selectionGroups != null)
-                groups = "[" + string.Join(", ", es.selectionGroups.Select(g => $"{g?.validOptions?.Count ?? -1} valid / max {g?.maxAmount}")) + "]";
+            {
+                groups = "[" + string.Join(", ", es.selectionGroups.Select(g => $"{g?.validOptions?.Count ?? -1} valid / max {g?.maxAmount} / min {g?.minAmount}")) + "]";
+                // Log totals + each option's card name and the PARENT Pokémon it's attached to — this is
+                // what tells us a discard like "choose any Fire Energy" spans several Pokémon (so the
+                // options must be labelled by parent), not just the active.
+                var opts = es.selectionGroups.Where(g => g != null).SelectMany(g => g.validOptions)
+                    .Select(o => $"{ResolveName(o.cardAddress.entityID)}@{(string.IsNullOrEmpty(o.parentEntityID) ? "-" : ResolveName(o.parentEntityID))}");
+                extra = $" total={es.totalMinAmount}/{es.totalMaxAmount} opts=[{string.Join(", ", opts)}]";
+            }
             else if (vs is ReparentSelection rs)
                 groups = $"reparentOptions={rs.reparentOptions?.Count ?? -1} min/max={rs.minReparentedOptions}/{rs.maxReparentedOptions} unlimited={rs.unlimitedReparent}";
             else if (vs is DamageSelection dsg)
                 groups = $"to={dsg.toDamageSelections?.Count ?? -1} from={dsg.fromDamageSelections?.Count ?? -1} movable={dsg.minMovableDamageTotal}/{dsg.maxMovableDamageTotal} perTarget={dsg.minRecvDamageSingle}/{dsg.maxRecvDamageSingle} targets={dsg.minTargetSelectionCount}/{dsg.maxTargetSelectionCount}";
-            Log.Info($"BattlePrompt: handler={handler?.GetType().Name ?? "null"} method={vs?.selectionMethod} selType={vs?.GetType().Name} groups={groups} built={_options.Count} q='{_question}'");
+            Log.Info($"BattlePrompt: handler={handler?.GetType().Name ?? "null"} method={vs?.selectionMethod} selType={vs?.GetType().Name} groups={groups}{extra} built={_options.Count} q='{_question}'");
         }
         catch (Exception ex) { Log.Error($"BattlePrompt: diagnostics threw: {ex.Message}"); }
     }
@@ -188,44 +248,109 @@ internal sealed class BattlePromptScreen : IScreenHandler
     {
         var group = prize.OnlyGroup;
         if (group == null) return;
+        _prizeMenu = prize;
+        var owner = ReadPrizeOwner(prize);
         var opts = group.validOptions;
         int n = opts.Count;
-        _target = group.maxAmount < 1 ? 1 : group.maxAmount;
+        _prizeMax = group.maxAmount < 1 ? 1 : group.maxAmount;
+        // Mirror the menu's own _minPrizesToSelect: minAmount unless it's -1 (= "exactly max").
+        _prizeMin = group.minAmount != -1 ? group.minAmount : _prizeMax;
+        _target = _prizeMax;
         for (int i = 0; i < n; i++)
         {
             int idx = i;
-            _options.Add(new Option { Name = $"Prize card {idx + 1} of {n}", Choose = () => MarkPrize(prize, idx) });
+            var card = owner?.GetPrivateCardAtIndex(opts[idx].cardAddress.index);
+            _options.Add(new Option { Name = "Prize card", Card = card, Choose = () => MarkPrize(prize, idx) });
         }
+        // A multi / variable take gets an explicit Done; single forced takes auto-submit on the pick.
+        if (_prizeMax > 1) _options.Add(new Option { Name = "Done", IsDone = true, Choose = () => SubmitPrize(prize) });
         if (string.IsNullOrWhiteSpace(_question))
-            _question = _target > 1 ? $"Take {_target} prize cards" : "Take a prize card";
+            _question = _prizeMax > 1 ? $"Take {_prizeMax} prize cards" : "Take a prize card";
     }
 
+    // Toggle a prize via the card's OWN click override — the exact sighted click. The menu wires each
+    // valid prize with a Select override (TryMarkCardSelected); once a card is selected its override
+    // swaps to Deselect (MarkCardDeselected), so a second press DESELECTS instead of re-adding. That
+    // fixes the freeze where calling TryMarkCardSelected directly added the same card to _selectedPrizes
+    // twice (duplicate → bad submit / soft-lock). The count is read from the menu's own _selectedPrizes.
     private void MarkPrize(PrizeCardSelectionMenu prize, int optionIndex)
     {
         var group = prize.OnlyGroup;
         if (group == null || optionIndex < 0 || optionIndex >= group.validOptions.Count) return;
 
-        // Resolve the face-down prize Card3D via the menu's own prize owner + the public index lookup,
-        // then mark it through the menu's own selection method (so highlights/state stay correct).
-        var owner = (PrizeController?)typeof(PrizeCardSelectionMenu)
-            .GetField("_currentPrizeOwner", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(prize);
+        var owner = ReadPrizeOwner(prize);
         var card = owner?.GetPrivateCardAtIndex(group.validOptions[optionIndex].cardAddress.index);
         if (card == null) { _router.Speech.Say("Couldn't take that prize", interrupt: true); return; }
 
-        typeof(PrizeCardSelectionMenu)
-            .GetMethod("TryMarkCardSelected", BindingFlags.Instance | BindingFlags.NonPublic)?
-            .Invoke(prize, new object[] { card, false });
-        _marked++;
-
-        if (_marked >= _target)
+        int prev = ReadSelectedPrizes(prize).Count;
+        var listener = card.Interactions != null ? card.Interactions.OverrideClickListener : null;
+        if (listener != null)
         {
-            _submitted = true;
-            prize.SubmitSelection();   // sends SelectInput, closes, resolves the held attack/KO log
+            try { listener.OnCardClicked(card, false); }   // routes to Select or Deselect per current state
+            catch (Exception ex) { Log.Error($"BattlePrompt prize click threw: {ex.Message}"); }
         }
         else
         {
-            _router.Speech.Say($"Prize selected, {_marked} of {_target}; choose {_target - _marked} more", interrupt: true);
+            // Fallback: the private select directly (only adds when valid + below max).
+            try
+            {
+                typeof(PrizeCardSelectionMenu).GetMethod("TryMarkCardSelected", BindingFlags.Instance | BindingFlags.NonPublic)?
+                    .Invoke(prize, new object[] { card, false });
+            }
+            catch (Exception ex) { Log.Error($"BattlePrompt prize mark threw: {ex.Message}"); }
         }
+
+        int now = ReadSelectedPrizes(prize).Count;
+        _marked = now;
+
+        if (now > prev)
+        {
+            // A forced exact take (min == max) auto-submits at the count — keeps "take 1" / "take 2"
+            // frictionless. A variable take waits for the Done option.
+            if (_prizeMin == _prizeMax && now >= _prizeMax) { _submitted = true; prize.SubmitSelection(); return; }
+            _router.Speech.Say($"Prize selected, {now} of {_prizeMax}" + (now < _prizeMax ? $"; choose {_prizeMax - now} more" : ""), interrupt: true);
+        }
+        else if (now < prev)
+        {
+            _router.Speech.Say($"Prize deselected, {now} selected", interrupt: true);
+        }
+        else
+        {
+            _router.Speech.Say(now >= _prizeMax ? "Already taken the maximum" : "Couldn't take that prize", interrupt: true);
+        }
+    }
+
+    // Submit a multi / variable prize take via the menu's own SubmitSelection, once the count is in range.
+    private void SubmitPrize(PrizeCardSelectionMenu prize)
+    {
+        int now = ReadSelectedPrizes(prize).Count;
+        if (now < _prizeMin) { _router.Speech.Say($"Choose at least {_prizeMin}; you have {now}", interrupt: true); return; }
+        if (now > _prizeMax) { _router.Speech.Say("Too many selected", interrupt: true); return; }
+        _submitted = true;
+        prize.SubmitSelection();
+    }
+
+    private static FieldInfo? _prizeOwnerField;
+    private static PrizeController? ReadPrizeOwner(PrizeCardSelectionMenu prize)
+    {
+        try
+        {
+            _prizeOwnerField ??= typeof(PrizeCardSelectionMenu).GetField("_currentPrizeOwner", BindingFlags.Instance | BindingFlags.NonPublic);
+            return _prizeOwnerField?.GetValue(prize) as PrizeController;
+        }
+        catch { return null; }
+    }
+
+    private static readonly List<Card3D> _noPrizes = new();
+    private static FieldInfo? _selectedPrizesField;
+    private static List<Card3D> ReadSelectedPrizes(PrizeCardSelectionMenu prize)
+    {
+        try
+        {
+            _selectedPrizesField ??= typeof(PrizeCardSelectionMenu).GetField("_selectedPrizes", BindingFlags.Instance | BindingFlags.NonPublic);
+            return (_selectedPrizesField?.GetValue(prize) as List<Card3D>) ?? _noPrizes;
+        }
+        catch { return _noPrizes; }
     }
 
     // ---- HAND / PILE / entity selection (discard N, search, choose card(s) from hand or a pile) ----
@@ -236,81 +361,322 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _entityOverlay = overlay;
         _entitySel = esel;
         _entityGroup = esel.selectionGroups[0];   // kept for the data-fallback path
-        // Total across ALL groups, not a single group's max — multi-group prompts like "1 Pokémon OR
-        // 1 Basic Energy" (Night Stretcher) have one group per kind, and the chosen card lands in
-        // whichever group accepts it. totalMaxAmount is the real count to submit at.
-        _target = esel.totalMaxAmount < 1 ? 1 : esel.totalMaxAmount;
-        // List EVERY group's options (was: only the first group — so the player only saw the Pokémon
-        // and never the Energy). Each option carries its own entityID; the native select routes it to
-        // the correct group.
-        foreach (var group in esel.selectionGroups)
+        // Board-attached / attached selections (e.g. "discard Fire Energy off your Pokémon") move the
+        // SPECIFIC public board card; resolve those by entityID so re-selecting toggles that exact card.
+        // Carousel/hand overlays (deck search, discard-from-hand) keep the source-owner / FTUE-focused
+        // resolution. (See MarkEntity.)
+        _bacsMenu = overlay as BoardAttachedCardSelectionMenu;   // the multi-parent kind needs distribute-first
+        _entityClickMenu = _bacsMenu != null || overlay is AttachedCardSelectionMenu;
+        // Totals across ALL groups — multi-group prompts ("1 Pokémon OR 1 Basic Energy", Night Stretcher)
+        // have one group per kind; the chosen card lands in whichever group accepts it.
+        _entityMin = esel.totalMinAmount < 0 ? 0 : esel.totalMinAmount;
+        _entityMax = esel.totalMaxAmount < 1 ? 1 : esel.totalMaxAmount;
+        _target = _entityMax;
+        // Build the card options to match what a sighted player sees:
+        if (_entityClickMenu)
         {
-            if (group == null) continue;
-            foreach (var opt in group.validOptions)
+            // Board-attached ("discard Fire Energy off your Pokémon"): ONE option per energy, tagged with
+            // its PARENT Pokémon (spoken as a section name, see SpeakOption) and grouped by parent so all
+            // of one Pokémon's energy reads consecutively.
+            var cardOpts = new List<(string sortKey, Option opt)>();
+            foreach (var group in esel.selectionGroups)
             {
-                var addr = opt.cardAddress;   // copy per-iteration so the lambda captures the right one
-                _options.Add(new Option { Name = ResolveName(addr.entityID), Choose = () => MarkEntity(addr), Eid = addr.entityID });
+                if (group == null) continue;
+                foreach (var opt in group.validOptions)
+                {
+                    var addr = opt.cardAddress;             // copy per-iteration so the lambda captures the right one
+                    string parentEid = opt.parentEntityID;  // the Pokémon this card is attached to (empty off-board)
+                    string cardName = ResolveName(addr.entityID);
+                    string? parentName = !string.IsNullOrEmpty(parentEid) ? ResolveParentName(parentEid) : null;
+                    cardOpts.Add((parentEid ?? "", new Option { Name = cardName, Parent = parentName, Eid = addr.entityID, Choose = () => MarkEntity(addr, cardName, parentEid) }));
+                }
             }
-        }
-        if (string.IsNullOrWhiteSpace(_question))
-            _question = $"Choose {_target} card" + (_target > 1 ? "s" : "");
-    }
-
-    // Select a card the NATIVE way: drive the same card-placement a click does. While the overlay is
-    // open the targeting handler's context is the overlay (BattleMenuNavigation applied it), so
-    // TryTargetCard routes to AddCardToSelection — which MOVES the card, runs ReactToSuccessfulPlacement
-    // → AddSelection (populates selectedOptions AND allSelectedCards so CleanUp transfers the card),
-    // and fires the card's UnfocusCard() → clears FTUEMatchManager.focusedCard so the tutorial advances.
-    // The old direct AddToSelectedOptionsByEntityID poke did NONE of that — the searched card arrived
-    // late and the FTUE never continued. ClickReleaseAutoPlacementInitiator auto-places onto the single
-    // SelectedReceiver synchronously (no mouse). Falls back to the data poke if the card can't be resolved.
-    private void MarkEntity(CardAddress addr)
-    {
-        if (_entityGroup == null || _entityOverlay == null) return;
-        var mgr = _mgr;
-        var th = mgr != null ? mgr.TargetingHandler : null;
-        var focused = FTUEMatchManager.Instance != null ? FTUEMatchManager.Instance.focusedCard : null;
-
-        // Re-evaluate targetability for the active overlay context — the carousel/hand cards become
-        // placeable only after they settle into their slots, and the game refreshes on those events;
-        // doing it here guarantees the state is current at the moment we select.
-        bool anyBefore = th != null && th.AreAnyCardsTargetable;
-        try { th?.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: RefreshPlacementContext threw: {ex.Message}"); }
-
-        Card3D? card = ResolveSelectionCard(addr, focused);
-        bool selected = false;
-        bool targetable = card != null && th != null && th.IsCardTargetable(card);
-        if (card != null && th != null && targetable)
-        {
-            try { selected = th.TryTargetCard(card, ClickReleaseAutoPlacementInitiator.ReusableInitiator); }
-            catch (Exception ex) { Log.Error($"BattlePrompt: native select threw: {ex.Message}"); }
-        }
-
-        Log.Info($"BattlePrompt select eid={addr.entityID} selected={selected} owner={card?.owner?.GetType().Name ?? "null"} " +
-                 $"isFocused={(card != null && ReferenceEquals(card, focused))} targetable={targetable} anyBefore={anyBefore} ctx={(th != null ? th.CurrentContextLabel : "?")}");
-
-        if (!selected)
-        {
-            // Data fallback: add to the group that actually OWNS this option (multi-group prompts have
-            // a group per kind), not always group 0.
-            var grp = _entitySel?.selectionGroups.FirstOrDefault(g => g.validOptions.Any(o => o.entityID == addr.entityID)) ?? _entityGroup;
-            grp?.AddToSelectedOptionsByEntityID(addr.entityID);
-        }
-
-        // Count selections across ALL groups from the game's own data (a native select moves the card and
-        // adds to its group's selectedOptions; the fallback adds directly) — not a private tally and not a
-        // single group — so it's truthful for multi-group prompts AND when the FTUE forces a card. The
-        // label shows ", selected" from the same data so the player sees what's chosen as they browse.
-        _marked = TotalSelected();
-        if (_marked >= _target)
-        {
-            _submitted = true;
-            _entityOverlay.SubmitClicked();   // validates min/max + submits + closes (the confirm button's own method)
+            cardOpts = cardOpts.OrderBy(c => c.sortKey, StringComparer.Ordinal).ToList();
+            foreach (var c in cardOpts) _options.Add(c.opt);
         }
         else
         {
-            _router.Speech.Say($"Selected, {_marked} of {_target}; choose {_target - _marked} more", interrupt: true);
+            // Carousel / pile / hand (deck search, discard-from-hand): the overlay STACKS identical cards
+            // into one pile with a count badge (e.g. 18 Basic Fire Energy). Mirror that — COLLAPSE
+            // identical cards (same displayed name) into ONE option carrying the pile's entityIDs
+            // (StackEids, for the live count). Selecting it peels the current targetable stack top
+            // (MarkStackOption), so a big pile reads as one entry and there's no stale-id problem as it
+            // shrinks. First-seen order is preserved.
+            var stacks = new Dictionary<string, List<string>>();
+            var order = new List<string>();
+            foreach (var group in esel.selectionGroups)
+            {
+                if (group == null) continue;
+                foreach (var opt in group.validOptions)
+                {
+                    string eid = opt.cardAddress.entityID;
+                    string name = ResolveName(eid);
+                    if (!stacks.TryGetValue(name, out var eids)) { eids = new List<string>(); stacks[name] = eids; order.Add(name); }
+                    eids.Add(eid);
+                }
+            }
+            foreach (var name in order)
+            {
+                string capturedName = name;
+                _options.Add(new Option { Name = name, Eid = stacks[name][0], StackEids = stacks[name], Choose = () => MarkStackOption(capturedName) });
+            }
         }
+        // Multi-pick ("choose any / up to N") needs an explicit Done so the player can stop short of the
+        // max and submit the few they chose. Single-pick still auto-submits on the pick (no Done shown).
+        if (_entityMax > 1) _options.Add(new Option { Name = "Done", IsDone = true, Choose = SubmitEntity });
+        if (string.IsNullOrWhiteSpace(_question))
+            _question = _entityMax > 1
+                ? (_entityMin == _entityMax ? $"Choose {_entityMax} cards" : $"Choose up to {_entityMax} cards")
+                : "Choose a card";
+    }
+
+    // The attached-to Pokémon's name for a section header, or null if it can't be resolved to a real
+    // name (ResolveName returns "card" as its fallback — not useful as a section).
+    private static string? ResolveParentName(string parentEntityID)
+    {
+        string parent = ResolveName(parentEntityID);
+        return string.IsNullOrEmpty(parent) || parent == "card" ? null : parent;
+    }
+
+    // Select a card the FULLY NATIVE way — drive the exact card movement a mouse click makes, NEVER a
+    // logical poke. TryTargetCard → AddCardToSelection MOVES the card → Card3D.SetOwnership → UnfocusCard
+    // → FTUEMatchManager.UnfocusCard clears focusedCard, which is what lets an FTUE "select N" step
+    // advance (its coroutine loops `while (focusedCard != null)`, FTUECardIndicator). The old
+    // AddToSelectedOptionsByEntityID data-poke never moved the card, so focusedCard never cleared → the
+    // tutorial froze (the Dawn "select 2 Basic Pokémon" freeze testers hit). So there is NO data-poke
+    // fallback: if the native select can't run we say so and leave the selection untouched (recoverable),
+    // never a half-selection that desyncs.
+    private void MarkEntity(CardAddress addr, string label, string? parentEid)
+    {
+        if (_entityOverlay == null || _mgr == null) return;
+        var th = _mgr.TargetingHandler;
+        if (th == null) return;
+        int prev = TotalSelected();
+        bool wasSelected = IsSelectedEid(addr.entityID);
+
+        try { th.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: RefreshPlacementContext threw: {ex.Message}"); }
+
+        // Board/attached selects act on the SPECIFIC public card by entityID (registry) so re-selecting
+        // toggles that exact card; carousel/hand use the source-owner held card, or the FTUE-forced
+        // focused card during a guided step.
+        Card3D? card = _entityClickMenu
+            ? _mgr.GetCard(addr.entityID)
+            : ResolveSelectionCard(addr, FTUEMatchManager.Instance != null ? FTUEMatchManager.Instance.focusedCard : null);
+
+        if (card == null) { _router.Speech.Say("Couldn't select that card", interrupt: true); Log.Info($"BattlePrompt entity: card null eid={addr.entityID}"); return; }
+
+        // A selection carousel STACKS identical cards (e.g. 18 Basic Fire Energy shown as one pile); only
+        // the stack's TOP card is targetable, so map a buried duplicate to its top — exactly what the
+        // game's own SelectionCardOwner.OnCardClicked does (GetFrontCardOfStackThatHoldsCard) before it
+        // targets. Without this, TryTargetCard on the option's own (buried) instance just returns false.
+        card = ResolveTargetableCard(card);
+
+        bool acted = false;
+        try { acted = th.TryTargetCard(card, ClickReleaseAutoPlacementInitiator.ReusableInitiator); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: TryTargetCard threw: {ex.Message}"); }
+
+        Log.Info($"BattlePrompt entity eid={addr.entityID} clickMenu={_entityClickMenu} acted={acted} wasSelected={wasSelected} owner={card.owner?.GetType().Name ?? "null"}");
+
+        // Board-attached, SELECTING an energy whose parent Pokémon isn't "open" yet: the energy isn't
+        // targetable until its parent is the one "distributing". The game opens ONE Pokémon at a time and
+        // BLOCKS clicking another while one is open — you must return to the mini-board first. So defer to
+        // TickPendingEnergySelect, which drives the whole sequence (close the wrong Pokémon → open this
+        // one → select). Only on a fresh select, never a deselect (a selected energy is already targetable).
+        if (!acted && !wasSelected && _bacsMenu != null && !string.IsNullOrEmpty(parentEid))
+        {
+            _pendingSelectEid = addr.entityID;
+            _pendingSelectParent = parentEid ?? "";
+            _pendingSelectTicks = 0;
+            Log.Info($"BattlePrompt entity: deferring select of {addr.entityID} on parent {parentEid}");
+            return;   // TickPendingEnergySelect opens the parent + selects + announces
+        }
+
+        AnnounceSelectionResult(prev, label, acted);
+    }
+
+    // Announce a select / deselect / failure from the game's OWN selection count, and auto-submit a
+    // single-pick prompt. Shared by the immediate path and the deferred board-attached path.
+    private void AnnounceSelectionResult(int prev, string nm, bool acted)
+    {
+        int now = TotalSelected();
+        _marked = now;
+        if (now > prev)
+        {
+            // Single-pick prompts (search a card, choose 1 Pokémon) submit immediately; multi-pick waits
+            // for the Done option so the player controls how many.
+            if (_entityMax == 1) { _submitted = true; _entityOverlay?.SubmitClicked(); return; }
+            _router.Speech.Say($"Selected {nm}, {now} of {_entityMax} chosen", interrupt: true);
+        }
+        else if (now < prev)
+        {
+            _router.Speech.Say($"Deselected {nm}, {now} chosen", interrupt: true);
+        }
+        else
+        {
+            _router.Speech.Say(acted ? "Couldn't change that selection" : "Couldn't select that card", interrupt: true);
+        }
+    }
+
+    // Finish a board-attached select after its parent began distributing: the energy becomes targetable
+    // once the carousel settles, so retry the native select each tick until it takes, then announce.
+    // Times out (no freeze) if it never becomes selectable.
+    private void TickPendingEnergySelect()
+    {
+        if (_mgr == null || string.IsNullOrEmpty(_pendingSelectEid)) { _pendingSelectEid = ""; _pendingSelectParent = ""; return; }
+        var th = _mgr.TargetingHandler;
+        try { th?.RefreshPlacementContext(); } catch { }
+
+        // The game opens ONE Pokémon's attached energies at a time and blocks switching while one is open.
+        // So make sure the energy's PARENT is the open one before selecting: a DIFFERENT Pokémon open →
+        // return to the mini-board to close it; NONE open → open this parent (its distribute click); the
+        // RIGHT one open → fall through and select. Act every ~8 frames so each close/open animation
+        // settles before we re-issue.
+        if (_bacsMenu != null && !string.IsNullOrEmpty(_pendingSelectParent))
+        {
+            string? curr = null;
+            try { curr = _bacsMenu.GetAttachmentDistributor()?.CurrentDistributingEndpoint?.EndpointID; } catch { }
+            if (curr != _pendingSelectParent)
+            {
+                if (_pendingSelectTicks % 8 == 0)
+                {
+                    if (!string.IsNullOrEmpty(curr))
+                    {
+                        try { _bacsMenu.ReturnCardsInSelectionModeToTinyBoard(); }
+                        catch (Exception ex) { Log.Error($"BattlePrompt: return-to-board threw: {ex.Message}"); }
+                    }
+                    else
+                    {
+                        var parent = _mgr.GetCard(_pendingSelectParent);
+                        if (parent != null) NativeClick(parent);
+                    }
+                }
+                if (++_pendingSelectTicks >= 120) FailPendingSelect();
+                return;
+            }
+        }
+
+        int prev = TotalSelected();
+        var card = _mgr.GetCard(_pendingSelectEid);
+        if (card != null) card = ResolveTargetableCard(card);   // once open, the energy is a stacked carousel card
+        bool acted = false;
+        if (card != null && th != null)
+        {
+            try { acted = th.TryTargetCard(card, ClickReleaseAutoPlacementInitiator.ReusableInitiator); }
+            catch (Exception ex) { Log.Error($"BattlePrompt: deferred TryTargetCard threw: {ex.Message}"); }
+        }
+        if (acted)
+        {
+            string nm = _options.FirstOrDefault(o => o.Eid == _pendingSelectEid)?.Name ?? "card";
+            _pendingSelectEid = ""; _pendingSelectParent = "";
+            AnnounceSelectionResult(prev, nm, acted: true);
+            return;
+        }
+        if (++_pendingSelectTicks >= 120) FailPendingSelect();
+    }
+
+    private void FailPendingSelect()
+    {
+        Log.Info($"BattlePrompt entity: deferred select timed out for {_pendingSelectEid} (parent {_pendingSelectParent})");
+        _pendingSelectEid = ""; _pendingSelectParent = "";
+        _router.Speech.Say("Couldn't select that energy", interrupt: true);
+    }
+
+    // The exact dispatch CardInteractions.OnUp makes for a real click: the card's override click listener
+    // if one is set (board / prize / a distributing parent / attached), else its owner's click listener
+    // (carousel / hand → the selection owner). We use it to distribute a board-attached parent Pokémon.
+    private bool NativeClick(Card3D card)
+    {
+        var ci = card.Interactions;
+        if (ci == null) return false;
+        try
+        {
+            if (ci.OverrideClickListener != null) { ci.OverrideClickListener.OnCardClicked(card, false); return true; }
+            if (ci.CardClickListener != null) { ci.CardClickListener.OnCardClicked(card, false); return true; }
+        }
+        catch (Exception ex) { Log.Error($"BattlePrompt: NativeClick threw: {ex.Message}"); }
+        return false;
+    }
+
+    private bool IsSelectedEid(string eid) =>
+        _entitySel != null && _entitySel.selectionGroups.Any(g => g.selectedOptions.Any(s => s.entityID == eid));
+
+    // Pick one card from a COLLAPSED pile (carousel/hand). Always selects the pile's current targetable
+    // TOP, so repeated presses peel cards off in order (up to the prompt's max) with no stale-id issues.
+    // Fully native: TryTargetCard moves the real card → clears FTUE focus. No deselect here — for a
+    // "choose up to N" you simply stop and press Done (board-attached discards keep per-card toggling).
+    private void MarkStackOption(string name)
+    {
+        if (_entityOverlay == null || _mgr == null) return;
+        var th = _mgr.TargetingHandler;
+        if (th == null) return;
+        int prev = TotalSelected();
+        try { th.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: RefreshPlacementContext threw: {ex.Message}"); }
+
+        var top = FindSelectableTop(name);
+        if (top == null) { _router.Speech.Say("Couldn't select that card", interrupt: true); Log.Info($"BattlePrompt stack: no targetable top for '{name}'"); return; }
+
+        bool acted = false;
+        try { acted = th.TryTargetCard(top, ClickReleaseAutoPlacementInitiator.ReusableInitiator); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: stack TryTargetCard threw: {ex.Message}"); }
+        Log.Info($"BattlePrompt stack '{name}' acted={acted} top={top.entityID}");
+
+        AnnounceSelectionResult(prev, name, acted);
+    }
+
+    // The current targetable top card of a pile (matched by displayed name): the FTUE-forced card if it
+    // belongs to this pile, else the source carousel/hand owner's accessible stack top. GetCardsAccessible-
+    // ForTargeting yields exactly the per-stack tops, so this is the card a real click would act on.
+    private Card3D? FindSelectableTop(string name)
+    {
+        var focused = FTUEMatchManager.Instance != null ? FTUEMatchManager.Instance.focusedCard : null;
+        if (focused != null && ResolveName(focused.entityID) == name) return focused;
+        try
+        {
+            foreach (var owner in UnityEngine.Object.FindObjectsByType<SelectionCardOwner>(FindObjectsSortMode.None))
+            {
+                if (owner == null || owner.AreHeldCardsConsideredSelected) continue;   // source / unselected side only
+                foreach (var c in owner.GetCardsAccessibleForTargeting())
+                    if (c != null && ResolveName(c.entityID) == name) return c;
+            }
+        }
+        catch (Exception ex) { Log.Warn($"BattlePrompt: FindSelectableTop threw: {ex.Message}"); }
+        return null;
+    }
+
+    // Submit a multi-pick entity selection through the overlay's OWN confirm path (its Done button).
+    // SubmitClicked validates min/max; if the player chose fewer than the max but met the minimum it
+    // raises the game's "you can still select more" confirmation — itself a ModalElementContainer the
+    // mod's ModalContainerScreen speaks and navigates. So we just press it and let the game decide.
+    // We do NOT set _submitted: if a confirm/error modal appears and the player cancels, the overlay
+    // stays open and we must remain interactive — Tick / OnResume detect the real close via IsPromptOpen.
+    private void SubmitEntity()
+    {
+        if (_entityOverlay == null) return;
+        try { _entityOverlay.SubmitClicked(); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: SubmitClicked threw: {ex.Message}"); }
+    }
+
+    // Map a card to the TARGETABLE instance the game would actually act on. A selection carousel (and the
+    // hand) STACKS identical cards by archetype and exposes only each stack's top via
+    // GetCardsAccessibleForTargeting() — a buried duplicate isn't targetable. SelectionCardOwner.OnCardClicked
+    // resolves the clicked card to its stack front (GetFrontCardOfStackThatHoldsCard) before targeting; we
+    // do the same: if the card isn't itself an accessible top, return the accessible top of its stack (the
+    // same-archetype one). Selecting any copy of an identical pile is equivalent. No-op for non-selection
+    // owners (board Pokémon, etc.), so it's safe to call on every path.
+    private static Card3D ResolveTargetableCard(Card3D card)
+    {
+        if (card.owner is not SelectionCardOwner sco) return card;
+        try
+        {
+            var tops = sco.GetCardsAccessibleForTargeting();
+            foreach (var c in tops) if (ReferenceEquals(c, card)) return card;   // already a stack top
+            int arch = card.cardDataRow != null ? card.cardDataRow.ArchetypeID : int.MinValue;
+            if (arch != int.MinValue)
+                foreach (var c in tops)
+                    if (c != null && c.cardDataRow != null && c.cardDataRow.ArchetypeID == arch) return c;
+        }
+        catch (Exception ex) { Log.Warn($"BattlePrompt: ResolveTargetableCard threw: {ex.Message}"); }
+        return card;
     }
 
     // Resolve the EXACT Card3D to select. During the FTUE, DoesFTUEPermitCardTargetability makes ONLY
@@ -471,80 +837,114 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _attachMenu = menu;
         _reparentSel = rsel;
         _target = 0;   // optional / unlimited — finish with the Done option
-        AddAttachEnergyOptions();
-        if (string.IsNullOrWhiteSpace(_question))
-            _question = "Attach energy to a Pokémon, or choose Done";
+        ShowAttachEnergyPiles(announce: false);
     }
 
-    // The energy list: one "Attach <energy>" per not-yet-attached reparent option, plus Done.
-    private void AddAttachEnergyOptions()
+    // PHASE 1 — handle the ENERGY first, exactly like grabbing a card: the energy you have to attach,
+    // as a pile with a LIVE count ("Basic Fire Energy, N available") so you always know how many are
+    // left, plus Done. (The game shows these in hand; you drag each onto a Pokémon.)
+    private void ShowAttachEnergyPiles(bool announce = true)
     {
         _options.Clear();
+        _attachEnergyName = null;
         if (_reparentSel != null)
+        {
+            var piles = new Dictionary<string, List<string>>();
+            var order = new List<string>();
             foreach (var ro in _reparentSel.reparentOptions)
             {
-                if (ro == null || string.IsNullOrEmpty(ro.entityID)) continue;
-                if (!string.IsNullOrEmpty(ro.newParentEntityID)) continue;   // already attached this step
-                var eid = ro.entityID;
-                _options.Add(new Option { Name = "Attach " + ResolveName(eid), Choose = () => MarkAttach(eid) });
+                if (ro == null || string.IsNullOrEmpty(ro.entityID) || !string.IsNullOrEmpty(ro.newParentEntityID)) continue;   // skip already-attached
+                string name = ResolveName(ro.entityID);
+                if (!piles.TryGetValue(name, out var eids)) { eids = new List<string>(); piles[name] = eids; order.Add(name); }
+                eids.Add(ro.entityID);
             }
-        _options.Add(new Option { Name = "Done", Choose = DoneAttach });
+            foreach (var name in order)
+            {
+                string captured = name;
+                _options.Add(new Option { Name = name, StackEids = piles[name], Choose = () => PickUpAttachEnergy(captured) });
+            }
+        }
+        _options.Add(new Option { Name = "Done", IsDone = true, Choose = DoneAttach });
+        _idx = 0;
+        _question = "Attach energy to your Pokémon, or Done";
+        if (announce) Announce();
     }
 
-    private void ShowAttachEnergyOptions()
+    // Chose an energy → PHASE 2: which Pokémon to put it on. List the eligible Pokémon as real, navigable
+    // board cards (Up/Down reads each, so two identical Charmeleon are tellable apart) + Back. The attach
+    // is the native targeting-handler drag (StartAttachHold), fired when you pick the Pokémon.
+    private void PickUpAttachEnergy(string name)
     {
-        AddAttachEnergyOptions();
+        _attachEnergyName = name;
+        ShowAttachReceivers();
+    }
+
+    private void ShowAttachReceivers()
+    {
+        _options.Clear();
+        var energy = AvailableAttachEnergy(_attachEnergyName);
+        int remaining = CountAvailableEnergy(_attachEnergyName);
+        if (energy != null && _attachMenu != null && _mgr != null)
+        {
+            try { _mgr.TargetingHandler?.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt attach refresh threw: {ex.Message}"); }
+            var receivers = _attachMenu.ValidPlacementReceivers(energy).Select(r => r as Card3D).Where(c => c != null).Select(c => c!);
+            if (FTUEHook.FtueIsRunning && FTUEMatchManager.Instance != null) receivers = receivers.Where(SafeFtuePermits);
+            foreach (var r in receivers)
+            {
+                var eid = r.entityID;
+                _options.Add(new Option { Name = ResolveName(eid), Eid = eid, Choose = () => AttachHeldEnergyTo(eid) });
+            }
+        }
+        _options.Add(new Option { Name = "Back", Choose = () => ShowAttachEnergyPiles() });
         _idx = 0;
-        _question = "Attach energy to a Pokémon, or choose Done";
+        _question = $"Attach {_attachEnergyName ?? "energy"} to which Pokémon? {remaining} left.";
         Announce();
     }
 
-    // Player picked an energy. Resolve its valid target Pokémon (narrowed to FTUE-permitted ones during
-    // the tutorial). One target → attach straight away; several → offer a target picker.
-    private void MarkAttach(string entityID)
+    private void AttachHeldEnergyTo(string receiverEid)
     {
         if (_attachMenu == null || _mgr == null) return;
-        var th = _mgr.TargetingHandler;
+        var energy = AvailableAttachEnergy(_attachEnergyName);
+        if (energy == null) { _router.Speech.Say("No energy left to attach", interrupt: true); ShowAttachEnergyPiles(); return; }
+        var receiver = _mgr.GetCard(receiverEid);
+        if (receiver == null) { _router.Speech.Say("Couldn't find that Pokémon", interrupt: true); return; }
+        StartAttachHold(energy, receiver);
+    }
+
+    // An available (not-yet-attached) energy of the given type, preferring the FTUE-forced card.
+    private Card3D? AvailableAttachEnergy(string? name)
+    {
+        if (_mgr == null || _reparentSel == null) return null;
         var focused = FTUEMatchManager.Instance != null ? FTUEMatchManager.Instance.focusedCard : null;
-        Card3D? energy = focused ?? _mgr.GetCard(entityID);
-        if (energy == null) { _router.Speech.Say("Couldn't find that energy", interrupt: true); return; }
-
-        try { th.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt attach refresh threw: {ex.Message}"); }
-
-        var receivers = _attachMenu.ValidPlacementReceivers(energy)
-            .Select(r => r as Card3D).Where(c => c != null).Select(c => c!).ToList();
-        if (FTUEHook.FtueIsRunning && FTUEMatchManager.Instance != null)
-            receivers = receivers.Where(SafeFtuePermits).ToList();
-
-        Log.Info($"BattlePrompt attach eid={entityID} energy={energy.entityID} receivers={receivers.Count}");
-
-        if (receivers.Count == 0) { _router.Speech.Say("No valid Pokémon to attach this energy to", interrupt: true); return; }
-        if (receivers.Count == 1) { StartAttachHold(energy, receivers[0]); return; }
-
-        // Several valid targets — let the player choose which Pokémon.
-        _attachEnergy = energy;
-        _options.Clear();
-        foreach (var r in receivers)
+        if (focused != null && _reparentSel.reparentOptions.Any(r => r != null && r.entityID == focused.entityID && string.IsNullOrEmpty(r.newParentEntityID))
+            && (name == null || ResolveName(focused.entityID) == name))
+            return focused;
+        foreach (var ro in _reparentSel.reparentOptions)
         {
-            var target = r;
-            _options.Add(new Option { Name = "To " + ResolveName(target.entityID), Choose = () => ChooseAttachTarget(target) });
+            if (ro == null || string.IsNullOrEmpty(ro.entityID) || !string.IsNullOrEmpty(ro.newParentEntityID)) continue;
+            if (name != null && ResolveName(ro.entityID) != name) continue;
+            return _mgr.GetCard(ro.entityID);
         }
-        _options.Add(new Option { Name = "Back", Choose = ShowAttachEnergyOptions });
-        _idx = 0;
-        _question = $"Attach {ResolveName(energy.entityID)} to which Pokémon?";
-        Announce();
+        return null;
+    }
+
+    private int CountAvailableEnergy(string? name)
+    {
+        if (_reparentSel == null) return 0;
+        int n = 0;
+        foreach (var ro in _reparentSel.reparentOptions)
+        {
+            if (ro == null || string.IsNullOrEmpty(ro.entityID) || !string.IsNullOrEmpty(ro.newParentEntityID)) continue;
+            if (name != null && ResolveName(ro.entityID) != name) continue;
+            n++;
+        }
+        return n;
     }
 
     private bool SafeFtuePermits(Card3D c)
     {
         try { return FTUEMatchManager.Instance.DoesFTUEPermitCardReceivability(c); }
         catch { return true; }
-    }
-
-    private void ChooseAttachTarget(Card3D target)
-    {
-        if (_attachEnergy == null) { ShowAttachEnergyOptions(); return; }
-        StartAttachHold(_attachEnergy, target);
     }
 
     // Drive the game's targeting handler to attach the energy onto THIS Pokémon — the same drag a
@@ -555,9 +955,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
     {
         if (_mgr == null) return;
         var th = _mgr.TargetingHandler;
-        if (!th.IsCardTargetable(energy)) { _router.Speech.Say("Can't attach that energy now", interrupt: true); ShowAttachEnergyOptions(); return; }
+        if (!th.IsCardTargetable(energy)) { _router.Speech.Say("Can't attach that energy now", interrupt: true); ShowAttachEnergyPiles(); return; }
         _attachInit.Reset();
-        if (!th.TryTargetCard(energy, _attachInit)) { _router.Speech.Say("Couldn't pick up that energy", interrupt: true); ShowAttachEnergyOptions(); return; }
+        if (!th.TryTargetCard(energy, _attachInit)) { _router.Speech.Say("Couldn't pick up that energy", interrupt: true); ShowAttachEnergyPiles(); return; }
         _attachEnergy = energy;
         _attachReceiver = target;
         _attachInit.SetChosen(target);
@@ -576,9 +976,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
             _attachHolding = false;
             _attachReceiver = null;
             _attachEnergy = null;
-            // Attach commits next frame; menu stays open for more (or auto-submits). Re-offer the energy
-            // list — if it auto-submitted, the next Tick's IsPromptOpen pops us instead.
-            if (IsPromptOpen()) ShowAttachEnergyOptions();
+            // Attach commits next frame; menu stays open for more (or auto-submits). Back to the energy
+            // list (count now lower) — if it auto-submitted, the next Tick's IsPromptOpen pops us instead.
+            if (IsPromptOpen()) ShowAttachEnergyPiles();
         }
     }
 
@@ -589,7 +989,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _attachHolding = false;
         _attachReceiver = null;
         _attachEnergy = null;
-        if (IsPromptOpen()) ShowAttachEnergyOptions();
+        if (IsPromptOpen()) ShowAttachEnergyPiles();
     }
 
     // Finish the attachment step via the menu's own CompleteReparentingAction (what its DONE button calls).
@@ -727,7 +1127,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
     // ---- Screen handler ----
 
     public void OnEnter() => Announce();
-    public void OnResume() => Announce();
+    // A child popped (e.g. the "still have selections" / overpay confirm modal). If submitting it
+    // actually closed the overlay, pop us; otherwise re-announce so the player can keep choosing.
+    public void OnResume() { if (!IsPromptOpen()) { Close(); return; } Announce(); }
     public void OnExit() { }
     public void RespeakAll() => Announce();
     public string StateSignature() => $"Prompt|{_question}|{_idx}|{IsPromptOpen()}";
@@ -735,8 +1137,25 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private void Announce()
     {
         _line = -1; _lines = null;   // re-orient to the header whenever we (re)announce
+        _lastSpokenParent = null;    // force the section header to speak on the first option
         if (!string.IsNullOrWhiteSpace(_question)) _router.Speech.Say(_question, interrupt: true);
-        if (_options.Count > 0) _router.Speech.Say(OptionLabel(_idx), interrupt: false);
+        if (_options.Count > 0) SpeakOption(_idx, interrupt: false);
+    }
+
+    // Speak an option, prefixing the parent Pokémon as a SECTION NAME only when it changes from the last
+    // option we announced — mirrors how menu groups announce their name on entry (KeyboardNavigator.
+    // GroupName) but not on every item. So energy on the same Pokémon reads "Basic Fire Energy, 2 of 4"
+    // while crossing to another Pokémon reads "Charmeleon. Basic Fire Energy, 3 of 4".
+    private void SpeakOption(int i, bool interrupt)
+    {
+        if (i < 0 || i >= _options.Count) return;
+        var o = _options[i];
+        string label = OptionLabel(i);
+        if (!string.IsNullOrEmpty(o.Parent) && o.Parent != _lastSpokenParent)
+            _router.Speech.Say($"{o.Parent}. {label}", interrupt);
+        else
+            _router.Speech.Say(label, interrupt);
+        _lastSpokenParent = o.Parent;
     }
 
     // Append ", selected" when the game's own selection data says this card is currently chosen — so
@@ -745,14 +1164,30 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private string OptionLabel(int i)
     {
         var o = _options[i];
-        string sel = (o.Eid != null && IsOptionSelected(o.Eid)) ? ", selected" : "";
-        return $"{o.Name}{sel}, {i + 1} of {_options.Count}";
+        if (o.StackEids != null)
+        {
+            // A collapsed pile: read its live remaining count + how many of it are chosen (the running
+            // total across the whole prompt is spoken on each pick).
+            int sel = o.StackEids.Count(IsSelectedEid);
+            int remaining = o.StackEids.Count - sel;
+            string body = $"{o.Name}, {remaining} available";
+            if (sel > 0) body += $", {sel} selected";
+            return $"{body}, {i + 1} of {_options.Count}";
+        }
+        string mark = IsOptionSelected(o) ? ", selected" : "";
+        return $"{o.Name}{mark}, {i + 1} of {_options.Count}";
     }
 
-    // Is this card currently selected, per the game's own selection data? Checks ALL entity groups
-    // (multi-group prompts), then the board / drag group.
-    private bool IsOptionSelected(string eid)
+    // Is this option currently selected, per the game's own data? Entity / board / drag picks live in a
+    // SelectionGroup's selectedOptions; prize picks live in the menu's private _selectedPrizes (read by
+    // Card3D membership, since the prize group's selectedOptions isn't populated until submit). The
+    // synthetic Done entry is never "selected".
+    private bool IsOptionSelected(Option o)
     {
+        if (o.IsDone) return false;
+        if (_prizeMenu != null && o.Card != null) return ReadSelectedPrizes(_prizeMenu).Contains(o.Card);
+        var eid = o.Eid;
+        if (eid == null) return false;
         if (_entitySel != null) return _entitySel.selectionGroups.Any(g => g.selectedOptions.Any(s => s.entityID == eid));
         if (_boardGroup != null) return _boardGroup.selectedOptions.Any(s => s.entityID == eid);
         if (_dragGroup != null) return _dragGroup.selectedOptions.Any(s => s.entityID == eid);
@@ -769,11 +1204,14 @@ internal sealed class BattlePromptScreen : IScreenHandler
         if (!IsPromptOpen()) { Close(); return; }          // submitted/dismissed → pop
         if (!Application.isFocused || _submitted) return;  // wait silently for the close after submit
         if (_attachHolding) { TickAttachCommit(); return; }   // committing an attach onto the chosen Pokémon
+        if (!string.IsNullOrEmpty(_pendingSelectEid)) { TickPendingEnergySelect(); return; }   // distributing then selecting an energy
 
-        // Left/Right move between options (they're a horizontal row on screen). Up/Down read the
-        // focused card's detail lines (HP, type, each attack/ability) like board-card reading — so the
-        // arrows don't all collapse into option-cycling. Options with no card (text choices, Done/Back,
-        // face-down prizes) have nothing to read, so Up/Down fall back to moving there.
+        // Tab jumps to the Done option (multi-pick confirm) for quick access — no-op if there isn't one.
+        if (Input.GetKeyDown(KeyCode.Tab)) { JumpToDone(); return; }
+
+        // ONLY Left/Right navigate between options. Up/Down read the focused card's detail lines (like
+        // board-card reading) and NEVER move between options — on a card with no readable lines they just
+        // re-read the option, they don't jump to another one.
         if (Input.GetKeyDown(KeyCode.RightArrow)) { Move(1); return; }
         if (Input.GetKeyDown(KeyCode.LeftArrow)) { Move(-1); return; }
         if (Input.GetKeyDown(KeyCode.DownArrow)) { ReadLine(1); return; }
@@ -799,7 +1237,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
         if (next == _idx) return;
         _idx = next;
         _line = -1; _lines = null;   // new option → reset line cursor; lines re-resolve on next Up/Down
-        _router.Speech.Say(OptionLabel(_idx), interrupt: true);
+        SpeakOption(_idx, interrupt: true);
     }
 
     private void JumpTo(int i)
@@ -807,7 +1245,15 @@ internal sealed class BattlePromptScreen : IScreenHandler
         if (i < 0 || i >= _options.Count) return;
         _idx = i;
         _line = -1; _lines = null;
-        _router.Speech.Say(OptionLabel(_idx), interrupt: true);
+        SpeakOption(_idx, interrupt: true);
+    }
+
+    // Tab → jump straight to the Done option (multi-pick menus) so the player doesn't have to arrow past
+    // every card to confirm. They still press Enter on it themselves.
+    private void JumpToDone()
+    {
+        int di = _options.FindIndex(o => o.IsDone);
+        if (di >= 0) JumpTo(di);
     }
 
     // Read the focused option's card line-by-line (Down = next line, Up = previous, back past line 0 =
@@ -818,7 +1264,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
     {
         if (_options.Count == 0) return;
         EnsureLines();
-        if (_lines == null || _lines.Count == 0) { Move(dir); return; }   // nothing to read → move options
+        // No detail to read (face-down prize, energy, synthetic option) → re-read the option; NEVER move
+        // between options (Left/Right is the only navigation).
+        if (_lines == null || _lines.Count == 0) { _router.Speech.Say(OptionLabel(_idx), interrupt: true); return; }
         if (dir > 0)
         {
             if (_line < _lines.Count - 1) { _line++; _router.Speech.Say(_lines[_line], interrupt: true); }
