@@ -134,27 +134,12 @@ internal sealed class ModalContainerScreen : IScreenHandler
         if (_groups.Count == 0) return;
         _activeGroup = 0;
 
-        // Select the first item silently, then speak the body + that item as ONE utterance. A separate
-        // queued (interrupt:false) item announce after a long interrupt:true body was getting cut off by
-        // the speech backend, so the user heard the body then the button stomping on it. Combining into a
-        // single Say(interrupt:true) guarantees "body. button" reads in order regardless of queue timing.
-        _groups[_activeGroup].FocusFirst(announce: false);
-        SpeakWithFocusedItem(description);
-    }
-
-    // Speak an optional preamble (the modal title/body) immediately followed by the focused item, as a
-    // single interrupting utterance — no reliance on same-frame speech queueing.
-    private void SpeakWithFocusedItem(string description)
-    {
-        var item = _activeGroup >= 0 && _activeGroup < _groups.Count
-            ? _groups[_activeGroup].CurrentItemSpeech()
-            : null;
-        string combined =
-            !string.IsNullOrWhiteSpace(description) && !string.IsNullOrWhiteSpace(item) ? $"{description}. {item}"
-            : !string.IsNullOrWhiteSpace(description) ? description!
-            : item ?? "";
-        if (!string.IsNullOrWhiteSpace(combined))
-            _router.Speech.Say(combined, interrupt: true);
+        // Speak the body (barging in), then QUEUE the focused button after it as its own announce —
+        // two separate utterances, so the button reads as a distinct, independently-navigable item.
+        // FocusFirst's interruptPrior:false is what makes the button queue rather than cut the body off.
+        if (!string.IsNullOrWhiteSpace(description))
+            _router.Speech.Say(description!, interrupt: true);
+        _groups[_activeGroup].FocusFirst(announce: true, interruptPrior: false);
     }
 
     public void OnResume()
@@ -172,9 +157,9 @@ internal sealed class ModalContainerScreen : IScreenHandler
         var title = ReadTmpText(titleText) ?? "";
         var bodyText = BuildBodyText(titleText);
         var description = BuildPreamble(title, bodyText);
-        // Re-select the current item silently, then speak body + item as one utterance (see OnEnter).
-        _groups[_activeGroup].RefocusCurrent(announce: false);
-        SpeakWithFocusedItem(description);
+        if (!string.IsNullOrWhiteSpace(description))
+            _router.Speech.Say(description!, interrupt: true);
+        _groups[_activeGroup].RefocusCurrent(announce: true, interrupt: false);
     }
 
     public string StateSignature()

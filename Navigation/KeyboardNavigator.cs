@@ -337,12 +337,15 @@ internal sealed class KeyboardNavigator : INavSection
     // Re-apply Selectable.Select + re-announce on the currently-focused item. Used by screen
     // handlers on OnResume to restore the player's position after a modal closes. Falls back
     // to FocusFirst if the saved index is no longer valid (item destroyed / removed).
-    public void RefocusCurrent(bool announce = true)
+    public void RefocusCurrent(bool announce = true, bool interrupt = true)
     {
         if (_index >= 0 && _index < _items.Count && IsActiveInHierarchy(_items[_index]))
         {
             _items[_index].Select();
-            if (announce) Speak(interrupt: true);
+            // interrupt:false lets a caller QUEUE the item after a preamble it just spoke (e.g. a
+            // modal speaking its body, then re-announcing the focused button after it) instead of
+            // barging over that preamble. Defaults to true so existing callers are unchanged.
+            if (announce) Speak(interrupt);
             return;
         }
         FocusFirst(announce);
@@ -604,21 +607,6 @@ internal sealed class KeyboardNavigator : INavSection
         if (sel == null) return;
         var label = _resolveLabel(sel);
         _speech.Say(Announce.Item(label, description: null, index: _index + 1, total: _items.Count), interrupt);
-    }
-
-    // The exact text Speak() would announce for the current item (optionally prefixed with the group
-    // name), returned WITHOUT speaking. Lets a handler fold the focused item into a single utterance
-    // with a preamble — e.g. a modal speaking "body. button" in one Say(interrupt:true) — which
-    // guarantees order without relying on same-frame queueing (interrupt:false after a long
-    // interrupt:true utterance was getting cut off by some speech backends).
-    public string? CurrentItemSpeech(bool includeGroupName = true)
-    {
-        var sel = Current;
-        if (sel == null) return null;
-        var item = Announce.Item(_resolveLabel(sel), description: null, index: _index + 1, total: _items.Count);
-        if (includeGroupName && !string.IsNullOrEmpty(GroupName))
-            return $"{GroupName}. {item}";
-        return item;
     }
 
     public static string DefaultLabel(Selectable s)

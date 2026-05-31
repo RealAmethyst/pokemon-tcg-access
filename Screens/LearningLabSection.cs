@@ -100,10 +100,10 @@ internal sealed class LearningLabSection : INavSection
         if (announce) AnnounceItem(interruptPrior, withLevelName: true);
     }
 
-    public void RefocusCurrent(bool announce = true)
+    public void RefocusCurrent(bool announce = true, bool interrupt = true)
     {
         if (_index < 0 || _index >= Count) _index = 0;
-        if (announce) AnnounceItem(interrupt: true, withLevelName: false);
+        if (announce) AnnounceItem(interrupt, withLevelName: false);
     }
 
     // Called by HUBHomeScreen when the SetupDisplay patch fires while this section is active

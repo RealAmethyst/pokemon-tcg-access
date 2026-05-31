@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using PokemonTCGLiveAccessibility.Hooks;
 using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
 using TMPro;
+using TPCI.Localization;
 using UnityEngine.UI;
 
 namespace PokemonTCGLiveAccessibility.Screens;
@@ -97,26 +99,25 @@ internal sealed class SimpleMessageScreen : IScreenHandler
             ? () => close.onClick?.Invoke()
             : (Action?)null;
 
-        // Skip the popup title when it matches the parent screen's title — PTCGL frequently
-        // reuses the same resourceID for both (e.g. the language picker's header AND its
-        // confirmation modal both render "Select Language"), and the user already knows
-        // which screen they're on. Empty titles are also skipped. Genuinely distinct titles
-        // ("Error", "You have been logged out", etc.) still get spoken.
-        var parentTitle = _router.PausedTitle;
-        var titleRedundant = string.IsNullOrWhiteSpace(title)
-            || string.Equals(title?.Trim(), parentTitle?.Trim(), System.StringComparison.OrdinalIgnoreCase);
-
-        string? preamble;
-        if (titleRedundant)
-            preamble = string.IsNullOrWhiteSpace(body) ? title : body;
-        else if (string.IsNullOrWhiteSpace(body))
-            preamble = title;
-        else
-            preamble = $"{title}. {body}";
-
+        // Build the spoken preamble (title + body), skipping a title that just repeats the parent
+        // screen's. Speak it barging in, then QUEUE the focused button after it as its own announce —
+        // two separate utterances, so the button reads as a distinct, independently-navigable item.
+        // FocusFirst's interruptPrior:false is what queues the button instead of cutting the body off;
+        // the bug was the parameterless FocusFirst(), which defaults to interruptPrior:true.
+        var preamble = BuildPreamble(title, body, _router.PausedTitle);
         if (!string.IsNullOrWhiteSpace(preamble))
             _router.Speech.Say(preamble!, interrupt: true);
-        _nav.FocusFirst();
+        _nav.FocusFirst(announce: true, interruptPrior: false);
+    }
+
+    // Title + body into one spoken preamble, skipping a title that just repeats the parent screen's.
+    private static string? BuildPreamble(string? title, string? body, string? parentTitle)
+    {
+        var titleRedundant = string.IsNullOrWhiteSpace(title)
+            || string.Equals(title?.Trim(), parentTitle?.Trim(), StringComparison.OrdinalIgnoreCase);
+        if (titleRedundant) return string.IsNullOrWhiteSpace(body) ? title : body;
+        if (string.IsNullOrWhiteSpace(body)) return title;
+        return $"{title}. {body}";
     }
 
     public void OnResume()
@@ -130,27 +131,15 @@ internal sealed class SimpleMessageScreen : IScreenHandler
 
     public void RespeakAll()
     {
-        // Game window regained focus — the popup may have opened (e.g. PTC login retry dialog)
-        // while the user was on a browser tab. Speak the same preamble OnEnter would have, then
-        // re-announce the focused button.
+        // Game window regained focus — the popup may have opened (e.g. PTC login retry) while the
+        // user was on a browser tab. Speak the body barging in, then queue the focused button after it.
         if (_msg == null) return;
 
         var (title, body, _) = ReadTexts(_msg);
-        var parentTitle = _router.PausedTitle;
-        var titleRedundant = string.IsNullOrWhiteSpace(title)
-            || string.Equals(title?.Trim(), parentTitle?.Trim(), StringComparison.OrdinalIgnoreCase);
-
-        string? preamble;
-        if (titleRedundant)
-            preamble = string.IsNullOrWhiteSpace(body) ? title : body;
-        else if (string.IsNullOrWhiteSpace(body))
-            preamble = title;
-        else
-            preamble = $"{title}. {body}";
-
+        var preamble = BuildPreamble(title, body, _router.PausedTitle);
         if (!string.IsNullOrWhiteSpace(preamble))
             _router.Speech.Say(preamble!, interrupt: true);
-        _nav.RefocusCurrent(announce: true);
+        _nav.RefocusCurrent(announce: true, interrupt: false);
     }
 
     public string StateSignature()
@@ -193,7 +182,24 @@ internal sealed class SimpleMessageScreen : IScreenHandler
         var fi = typeof(SimpleMessage).GetField(fieldName, flags);
         var loc = fi?.GetValue(m) as UnityEngine.Component;
         if (loc == null) return null;
+
+        // Prefer the live TMP text, but the loc-args overload (SetTextByIDFormat — used by the logout
+        // confirm) may not have pushed to the TMP yet when our Open postfix runs. Fall back to the
+        // LocText's own CurrentText, then resolve its resourceId through the loc table, so the body is
+        // never silently empty. (Without this the logout body read blank because only the title — set
+        // via SetTextByID — had rendered.)
         var tmp = loc.GetComponent<TMP_Text>();
+        if (tmp != null && !string.IsNullOrWhiteSpace(tmp.text)) return tmp.text;
+
+        if (loc is LocText lt)
+        {
+            if (!string.IsNullOrWhiteSpace(lt.CurrentText)) return lt.CurrentText;
+            if (!string.IsNullOrEmpty(lt.resourceId))
+            {
+                var resolved = LocalizationHook.Get(lt.resourceId);
+                if (!string.IsNullOrWhiteSpace(resolved)) return resolved;
+            }
+        }
         return tmp != null ? tmp.text : null;
     }
 

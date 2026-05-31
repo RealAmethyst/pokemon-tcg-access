@@ -19,6 +19,8 @@ internal interface INavSection
     void FocusFirst(bool announce = true, bool interruptPrior = true);
     void FocusFirstRow(int preferredColumn = -1, bool announce = true, bool interruptPrior = true);
     void FocusLastRow(int preferredColumn = -1, bool announce = true, bool interruptPrior = true);
-    void RefocusCurrent(bool announce = true);
+    // interrupt:false lets a caller queue the re-announce after a preamble it just spoke (e.g. a
+    // modal body) instead of barging over it; defaults to true (barge in) for ordinary refocus.
+    void RefocusCurrent(bool announce = true, bool interrupt = true);
     void Tick();
 }
