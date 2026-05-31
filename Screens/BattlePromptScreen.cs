@@ -613,7 +613,15 @@ internal sealed class BattlePromptScreen : IScreenHandler
         try { th.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: RefreshPlacementContext threw: {ex.Message}"); }
 
         var top = FindSelectableTop(name);
-        if (top == null) { _router.Speech.Say("Couldn't select that card", interrupt: true); Log.Info($"BattlePrompt stack: no targetable top for '{name}'"); return; }
+        if (top == null)
+        {
+            // No unselected front of this name remains → the whole pile is already chosen. State it
+            // (not a failure) so the player knows to move on / press Done, rather than hearing a
+            // misleading "couldn't select".
+            _router.Speech.Say($"No more {name} to choose, {TotalSelected()} of {_entityMax} chosen", interrupt: true);
+            Log.Info($"BattlePrompt stack: no targetable front for '{name}' selected={TotalSelected()}/{_entityMax}");
+            return;
+        }
 
         bool acted = false;
         try { acted = th.TryTargetCard(top, ClickReleaseAutoPlacementInitiator.ReusableInitiator); }
@@ -623,24 +631,40 @@ internal sealed class BattlePromptScreen : IScreenHandler
         AnnounceSelectionResult(prev, name, acted);
     }
 
-    // The current targetable top card of a pile (matched by displayed name): the FTUE-forced card if it
-    // belongs to this pile, else the source carousel/hand owner's accessible stack top. GetCardsAccessible-
-    // ForTargeting yields exactly the per-stack tops, so this is the card a real click would act on.
+    // The current targetable TOP card of a pile (matched by displayed name). A real click only ever
+    // hits a stack's CURRENT FRONT: SelectionCardOwner.OnCardClicked → GetFrontCardOfStackThatHoldsCard
+    // → TryTargetCard(front). So we must return a genuine live front of the UNSELECTED (source) side —
+    // never a stale reference, never an already-selected card. GetCardsAccessibleForTargeting() yields
+    // exactly the per-stack fronts, and a selected card has moved to the selected-side owner, so it
+    // naturally drops out of this scan.
+    //
+    // FTUE: a forced "select this card" step makes only FTUEMatchManager.focusedCard targetable, so we
+    // honour it — but ONLY when it's actually one of those current unselected fronts. The old code
+    // returned focusedCard unconditionally on a name match; that was the deck-search bug — after a
+    // selection the focus stayed pointing at the just-selected card (now on the selected side), so
+    // repeated Enter re-targeted that same card (thrashing the count, the top=… repeats in the log)
+    // and the genuine remaining front was never reached. Requiring focus to be a live front, and
+    // skipping selected cards, fixes the multi-select while still serving forced FTUE picks (there,
+    // focus IS the one allowed front).
     private Card3D? FindSelectableTop(string name)
     {
         var focused = FTUEMatchManager.Instance != null ? FTUEMatchManager.Instance.focusedCard : null;
-        if (focused != null && ResolveName(focused.entityID) == name) return focused;
+        Card3D? front = null;
         try
         {
             foreach (var owner in UnityEngine.Object.FindObjectsByType<SelectionCardOwner>(FindObjectsSortMode.None))
             {
                 if (owner == null || owner.AreHeldCardsConsideredSelected) continue;   // source / unselected side only
                 foreach (var c in owner.GetCardsAccessibleForTargeting())
-                    if (c != null && ResolveName(c.entityID) == name) return c;
+                {
+                    if (c == null || ResolveName(c.entityID) != name || IsSelectedEid(c.entityID)) continue;
+                    if (focused != null && ReferenceEquals(c, focused)) return c;   // the forced-FTUE card, and it's a live front
+                    front ??= c;                                                    // first genuine current front
+                }
             }
         }
         catch (Exception ex) { Log.Warn($"BattlePrompt: FindSelectableTop threw: {ex.Message}"); }
-        return null;
+        return front;
     }
 
     // Submit a multi-pick entity selection through the overlay's OWN confirm path (its Done button).
