@@ -119,6 +119,10 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         // Forced tutorial focus (reparented element) — present + drive it; nothing else this tick.
         if (PresentFtueIfActive(interrupt: false)) { _ftueNav?.Tick(); return; }
 
+        // Escape opens the overflow (⋮) menu — the same affordance as the top-bar button. There's no
+        // other "back" on the deck list (the editor is a separate screen), so Escape is free here.
+        if (UnityEngine.Input.GetKeyDown(KeyCode.Escape)) { HUBOverflowMenuScreen.TryOpen(); return; }
+
         if (UnityEngine.Input.GetKeyDown(KeyCode.Tab))
         {
             var shift = UnityEngine.Input.GetKey(KeyCode.LeftShift) || UnityEngine.Input.GetKey(KeyCode.RightShift);

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
+using MatchLogic;
 using PokemonTCGLiveAccessibility.Hooks;
 using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
@@ -60,6 +61,13 @@ internal sealed class HUBHomeScreen : IScreenHandler
 
     private int _tabGroupIndex = -1;
     private int _mainGroupIndex = -1;
+
+    // LEARN (the Learning Lab game-mode tab) is the selected mode. ChangeToLearningLabs sets this
+    // (GameplayType.Offline) synchronously, but the lesson list's SetupDisplay — and so
+    // LearningLabSection.IsShowing — only follows a frame or more later. The gap between "LEARN is
+    // selected" and "the lessons are showing" is the async-load window the Enter/Down handling has
+    // to bridge so a quick keypress isn't lost.
+    private static bool LearnModeSelected => HUBGameModeController.gameplayType == GameplayType.Offline;
 
     public string Name => "Home";
 
@@ -235,6 +243,17 @@ internal sealed class HUBHomeScreen : IScreenHandler
             else _groups[_activeGroup].FocusLastRow(preferredColumn: col, announce: true, interruptPrior: true);
             return;
         }
+        // Down from the game-mode tabs while LEARN is the selected mode drops into the Learning Lab
+        // lessons. They load asynchronously (ChangeToLearningLabs sets the mode synchronously but the
+        // list's SetupDisplay fires a frame or more later), so if they aren't showing yet, arm the
+        // dive and let OnContentChanged complete it when the list appears — rather than escaping to
+        // the transient/empty section that briefly sits below the tabs mid-load.
+        if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow) && nav.IsAtBottomRow
+            && _activeGroup == _tabGroupIndex && LearnModeSelected && !LearningLabSection.IsShowing)
+        {
+            _pendingEnterContent = true;
+            return;
+        }
         if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow) && _activeGroup < _groups.Count - 1 && nav.IsAtBottomRow)
         {
             _pendingEnterContent = false;
@@ -253,14 +272,20 @@ internal sealed class HUBHomeScreen : IScreenHandler
         {
             var cur = tabsNav.Current as Toggle;
             bool wasOn = cur != null && cur.isOn;
-            if (wasOn && LearningLabSection.IsShowing && _mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count)
+            // Already on LEARN with the lessons loaded → step straight in.
+            if (wasOn && LearnModeSelected && LearningLabSection.IsShowing && _mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count)
             {
+                _pendingEnterContent = false;
                 _activeGroup = _mainGroupIndex;
                 _groups[_activeGroup].FocusFirstRow(announce: true, interruptPrior: true);
                 return;
             }
+            // Select the focused mode (radio) / re-announce an already-selected one. If that mode is
+            // LEARN, its lessons load asynchronously — arm the dive so OnContentChanged steps in when
+            // they appear (and re-arm on a repeat Enter pressed while still loading). Any non-LEARN
+            // mode has no drop-in content section, so this clears a stale pending dive.
             tabsNav.Activate(isSpaceKey: false);
-            _pendingEnterContent = !wasOn;   // a fresh selection; resolved (dive) only if it's LEARN
+            _pendingEnterContent = LearnModeSelected && !LearningLabSection.IsShowing;
             return;
         }
 
@@ -527,6 +552,10 @@ internal sealed class HUBHomeScreen : IScreenHandler
     {
         var g = new KeyboardNavigator(_router.Speech) { AllowTab = false, RadioToggleMode = radioMode, GroupName = groupName };
         g.SetItems(items, resolver);
+        // Escape on any flat HOME section opens the overflow (⋮) menu — the same affordance a
+        // sighted player gets from the top-bar button. The Learning Lab section (added separately,
+        // not via AddGroup) keeps Escape for drilling back out of the lessons.
+        g.OnBack = OpenOverflowMenu;
         _groups.Add(g);
         var names = string.Join(", ", items.Take(20).Select(s => s != null ? s.gameObject.name : "<null>"));
         var extra = items.Count > 20 ? $" (+{items.Count - 20} more)" : string.Empty;
@@ -633,6 +662,9 @@ internal sealed class HUBHomeScreen : IScreenHandler
         }
         return null;
     }
+
+    // Escape on a flat HOME section opens the overflow (⋮) menu via its real top-bar button.
+    private static void OpenOverflowMenu() => HUBOverflowMenuScreen.TryOpen();
 
     private static float ReadingOrder(Transform t)
     {

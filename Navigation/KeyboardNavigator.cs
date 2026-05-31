@@ -176,6 +176,19 @@ internal sealed class KeyboardNavigator : INavSection
         }
     }
 
+    // Force a flat single-column vertical list, overriding the bounding-box auto-detection. Call
+    // AFTER SetItems. Use this for menus/panels that are conceptually a simple top-to-bottom list
+    // and must have predictable Up/Down through every item — auto-detect can mis-read the axis when
+    // the item set includes an off-to-the-side or full-screen element (e.g. a window X plus an
+    // invisible tap-outside blocker), which strands vertical navigation. Down/Up then step linearly
+    // through every item in reading order, exactly like Tab.
+    public void ForceFlatVertical()
+    {
+        Columns = 1;
+        AllowVertical = true;
+        AllowHorizontal = false;
+    }
+
     // Count of items in the first visual row — used by Up/Down to jump rows instead of items.
     // Items are expected ordered top-to-bottom, left-to-right (HUBProfileScreen.RebuildGroups
     // does this via ReadingOrder). We count consecutive items whose y matches the first

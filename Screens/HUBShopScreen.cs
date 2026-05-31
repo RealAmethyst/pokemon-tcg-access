@@ -296,6 +296,8 @@ internal sealed class HUBShopScreen : IScreenHandler
     {
         var g = new KeyboardNavigator(_router.Speech) { AllowTab = false, RadioToggleMode = radioMode, GroupName = groupName };
         g.SetItems(items, resolver);
+        // Escape on any Shop section opens the overflow (⋮) menu — same as the top-bar button.
+        g.OnBack = OpenOverflowMenu;
         _groups.Add(g);
         var names = string.Join(", ", items.Take(20).Select(s => s != null ? s.gameObject.name : "<null>"));
         var extra = items.Count > 20 ? $" (+{items.Count - 20} more)" : string.Empty;
@@ -376,6 +378,9 @@ internal sealed class HUBShopScreen : IScreenHandler
         }
         return null;
     }
+
+    // Escape on a Shop section opens the overflow (⋮) menu via its real top-bar button.
+    private static void OpenOverflowMenu() => HUBOverflowMenuScreen.TryOpen();
 
     private static float ReadingOrder(Transform t)
     {

@@ -527,6 +527,9 @@ internal sealed class HUBProfileScreen : IScreenHandler
     {
         var g = new KeyboardNavigator(_router.Speech) { AllowTab = false };
         g.SetItems(items, resolver);
+        // Escape on any Profile section opens the overflow (⋮) menu — the same affordance a sighted
+        // player gets from the top-bar button (the navigator guards Backspace while a field is focused).
+        g.OnBack = OpenOverflowMenu;
         _groups.Add(g);
         var names = string.Join(", ", items.Take(20).Select(s => s != null ? s.gameObject.name : "<null>"));
         var extra = items.Count > 20 ? $" (+{items.Count - 20} more)" : string.Empty;
@@ -581,6 +584,9 @@ internal sealed class HUBProfileScreen : IScreenHandler
         }
         return null;
     }
+
+    // Escape on a Profile section opens the overflow (⋮) menu via its real top-bar button.
+    private static void OpenOverflowMenu() => HUBOverflowMenuScreen.TryOpen();
 
     private static float ReadingOrder(Transform t)
     {

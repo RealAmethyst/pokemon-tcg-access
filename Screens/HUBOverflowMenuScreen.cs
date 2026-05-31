@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using HarmonyLib;
 using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
@@ -97,10 +98,14 @@ internal sealed class HUBOverflowMenuScreen : IScreenHandler
         var items = ov != null
             ? ov.GetComponentsInChildren<Button>(includeInactive: false)
                 .Where(b => b.isActiveAndEnabled)
+                .Where(b => !IsCloseChrome(b.gameObject.name))
                 .Cast<Selectable>()
                 .OrderBy(s => ReadingOrder(s.transform)).ToList()
             : new List<Selectable>();
         _nav.SetItems(items);
+        // The menu is a vertical list — force it (auto-axis detection was reading horizontal because
+        // the full-screen tap-outside blocker skewed the bounding box, so Up/Down did nothing).
+        _nav.ForceFlatVertical();
         _nav.OnBack = () => _controller?.Dismiss();   // Escape / Backspace closes the menu
 
         if (!announce) return;
@@ -108,6 +113,45 @@ internal sealed class HUBOverflowMenuScreen : IScreenHandler
         if (items.Count > 0) _nav.FocusFirst(announce: true, interruptPrior: false);
         Log.Info($"Menu: {items.Count} buttons — {string.Join(", ", items.Take(16).Select(s => s.gameObject.name))}");
     }
+
+    // Open the overflow menu from anywhere (e.g. Escape on a HUB screen) by invoking the top bar's
+    // real ⋮ button — the same click a sighted player makes. Gated on the button being active and
+    // interactable, so we never open it when the game wouldn't let a mouse user. If the menu is
+    // already open, this closes it instead (so the same key toggles). Returns true when it acted.
+    // The overlay's own activate/deactivate listeners route through Activate_Postfix /
+    // Deactivate_Postfix exactly like a mouse click, so the handler wires up automatically.
+    public static bool TryOpen()
+    {
+        if (_instance != null && _instance._active)
+        {
+            _instance._controller?.Dismiss();
+            return true;
+        }
+        var top = Object.FindAnyObjectByType<HUBTopController_L>();
+        if (top == null) return false;
+        var t = ReadField<Transform>(top, "settingsButton");
+        var btn = t != null ? t.GetComponent<Button>() : null;
+        if (btn == null || !btn.isActiveAndEnabled || !btn.IsInteractable()) return false;
+        btn.onClick?.Invoke();
+        return true;
+    }
+
+    private static T? ReadField<T>(object instance, string name) where T : class
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        for (var ty = instance.GetType(); ty != null; ty = ty.BaseType)
+        {
+            var f = ty.GetField(name, flags);
+            if (f != null) return f.GetValue(instance) as T;
+        }
+        return null;
+    }
+
+    // The window-chrome close affordances aren't real menu entries: "Close" is the X (redundant with
+    // Escape, which we wire to Dismiss) and "CloseTransparent" is the invisible tap-outside blocker
+    // (a full-screen button behind the menu). Both route to the same Dismiss, so listing them just
+    // clutters the top of the menu and — being off to the side / full-screen — skews axis detection.
+    private static bool IsCloseChrome(string name) => name == "Close" || name == "CloseTransparent";
 
     private static float ReadingOrder(Transform t) { var p = t.position; return -p.y * 10000 + p.x; }
 }
