@@ -81,13 +81,22 @@ internal sealed class LearningLabSection : INavSection
         if (announce) AnnounceItem(interruptPrior, withLevelName: true);
     }
 
-    // Entering this section from the tabs above (Down-escape) lands on the first lesson.
+    // Entering this section from an adjacent section (Down-escape from the tabs, or diving in). Per-
+    // section memory: keep our own last lesson position if it's still valid, so leaving and coming
+    // back lands where the user was — only fall to the first lesson on a genuine first visit. (Level
+    // changes reset _index to 0 via OnLevelChanged, so a stale index never survives a drill in/out.)
     public void FocusFirstRow(int preferredColumn = -1, bool announce = true, bool interruptPrior = true)
-        => FocusFirst(announce, interruptPrior);
+    {
+        if (_index < 0 || _index >= Count) _index = 0;
+        _lineIndex = -1;
+        if (announce) AnnounceItem(interruptPrior, withLevelName: true);
+    }
 
     public void FocusLastRow(int preferredColumn = -1, bool announce = true, bool interruptPrior = true)
     {
-        _index = Mathf.Max(0, Count - 1); _lineIndex = -1;
+        // Per-section memory first; only fall to the last lesson on a first visit.
+        if (_index < 0 || _index >= Count) _index = Mathf.Max(0, Count - 1);
+        _lineIndex = -1;
         if (announce) AnnounceItem(interruptPrior, withLevelName: true);
     }
 

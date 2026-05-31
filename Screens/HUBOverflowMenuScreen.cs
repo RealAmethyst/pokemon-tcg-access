@@ -95,10 +95,16 @@ internal sealed class HUBOverflowMenuScreen : IScreenHandler
     {
         if (_controller == null) return;
         var ov = _controller.MyOverlayScreenGroup;
+        // The persistent top tab strip (HOME / DECKS / PROFILE / SHOP / BATTLE PASS / CARD DEX) and the
+        // ⋮ button live in the same canvas hierarchy the overlay sweep reaches, so they'd otherwise show
+        // up inside the menu — redundant, since they're always reachable on the top bar itself. Exclude
+        // them by identity (robust regardless of how the prefab nests them).
+        var topBar = TopBarButtons();
         var items = ov != null
             ? ov.GetComponentsInChildren<Button>(includeInactive: false)
                 .Where(b => b.isActiveAndEnabled)
                 .Where(b => !IsCloseChrome(b.gameObject.name))
+                .Where(b => !topBar.Contains(b))
                 .Cast<Selectable>()
                 .OrderBy(s => ReadingOrder(s.transform)).ToList()
             : new List<Selectable>();
@@ -152,6 +158,27 @@ internal sealed class HUBOverflowMenuScreen : IScreenHandler
     // (a full-screen button behind the menu). Both route to the same Dismiss, so listing them just
     // clutters the top of the menu and — being off to the side / full-screen — skews axis detection.
     private static bool IsCloseChrome(string name) => name == "Close" || name == "CloseTransparent";
+
+    // The persistent top-bar buttons (the HOME/DECKS/… nav strip + the ⋮ overflow button), gathered by
+    // identity from HUBTopController_L so they can be excluded from the menu's own list — they're always
+    // available on the top bar, so repeating them inside the menu is just clutter.
+    private static HashSet<Selectable> TopBarButtons()
+    {
+        var set = new HashSet<Selectable>();
+        var top = Object.FindAnyObjectByType<HUBTopController_L>();
+        if (top == null) return set;
+        var navGroups = ReadField<List<PersistentNavButtonGroup>>(top, "persistentNavButtons");
+        if (navGroups != null)
+            foreach (var pnb in navGroups)
+            {
+                var btn = pnb != null ? ReadField<Button>(pnb, "navButton") : null;
+                if (btn != null) set.Add(btn);
+            }
+        var settingsT = ReadField<Transform>(top, "settingsButton");
+        var overflow = settingsT != null ? settingsT.GetComponent<Button>() : null;
+        if (overflow != null) set.Add(overflow);
+        return set;
+    }
 
     private static float ReadingOrder(Transform t) { var p = t.position; return -p.y * 10000 + p.x; }
 }

@@ -42,6 +42,7 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
 
     private readonly List<DeckSelectEntry> _entries = new();
     private int _deckIndex;   // -1 = the synthetic "Create a deck" item, 0..n = deck tiles
+    private int _subIndexAtPause = -1;   // saved Top/Tabs/Detail position across a menu/popup pause
 
     // Tutorial: the game reparents the FTUE-focused element under a Blocker; since this handler owns
     // the screen, we present that element ourselves (the global fallback only fires with no handler).
@@ -98,10 +99,38 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
     {
         Rebuild();
         if (PresentFtueIfActive(interrupt: true)) return;
+        RestoreSubFocus();                 // returning from the ⋮ menu / a popup → exact prior position
         ReAnnounce(interrupt: true);
     }
 
-    public void OnExit() { }
+    public void OnExit()
+    {
+        // Remember the within-section position so a menu/popup round-trip lands back on it. The deck
+        // grid already persists via _deckIndex; this covers the Top strip / grouping Tabs / Detail panel.
+        _subIndexAtPause = _section switch
+        {
+            Section.Top => _topNav?.Index ?? -1,
+            Section.Tabs => _tabsNav?.Index ?? -1,
+            Section.Detail => _detailNav?.Index ?? -1,
+            _ => -1,
+        };
+    }
+
+    // Restore the saved sub-section index into the freshly-rebuilt navigator (Rebuild creates new
+    // KeyboardNavigators with no memory of the prior index). ReAnnounce then re-selects + reads it.
+    private void RestoreSubFocus()
+    {
+        if (_subIndexAtPause < 0) return;
+        KeyboardNavigator? nav = _section switch
+        {
+            Section.Top => _topNav,
+            Section.Tabs => _tabsNav,
+            Section.Detail => _detailNav,
+            _ => null,
+        };
+        if (nav != null && _subIndexAtPause < nav.Count)
+            nav.FocusIndex(_subIndexAtPause, announce: false, interrupt: true);
+    }
 
     public void RespeakAll() { Rebuild(); ReAnnounce(interrupt: false); }
 

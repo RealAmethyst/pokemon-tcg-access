@@ -47,6 +47,7 @@ internal sealed class HUBProfileScreen : IScreenHandler
 
     private bool _hasAnnouncedAtAll;
     private string _structureAtPause = string.Empty;
+    private int _indexAtPause = -1;
     private Selectable? _lastFtueTarget;
     private bool _subscribedToFtue;
     private Coroutine? _ftueWaitCoroutine;
@@ -157,13 +158,26 @@ internal sealed class HUBProfileScreen : IScreenHandler
         if (nowStructure != _structureAtPause)
             Announce();
         else
-            _groups[_activeGroup].RefocusCurrent(announce: false);
+            RestoreGroupFocus();   // structure unchanged (e.g. closed the ⋮ menu / a popup) → exact prior focus
     }
 
     public void OnExit()
     {
         CancelFtueSettlementWait();
         _structureAtPause = StructureSignature();
+        _indexAtPause = (_groups.Count > 0 && _activeGroup >= 0 && _activeGroup < _groups.Count)
+            ? _groups[_activeGroup].Index : -1;
+    }
+
+    // Restore the exact item the user was on before the pause (captured in OnExit), so returning from
+    // the overflow menu or a popup lands focus where they left it rather than the group's first item.
+    private void RestoreGroupFocus()
+    {
+        var g = _groups[_activeGroup];
+        if (_indexAtPause >= 0 && _indexAtPause < g.Count)
+            g.FocusIndex(_indexAtPause, announce: false, interrupt: true);
+        else
+            g.RefocusCurrent(announce: false);
     }
 
     // Native-state polling, modelled on DefaultFTUEController.WaitToEnable (which yields per

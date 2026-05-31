@@ -134,9 +134,27 @@ internal sealed class ModalContainerScreen : IScreenHandler
         if (_groups.Count == 0) return;
         _activeGroup = 0;
 
-        if (!string.IsNullOrWhiteSpace(description))
-            _router.Speech.Say(description!, interrupt: true);
-        _groups[_activeGroup].FocusFirst(announce: true, interruptPrior: false);
+        // Select the first item silently, then speak the body + that item as ONE utterance. A separate
+        // queued (interrupt:false) item announce after a long interrupt:true body was getting cut off by
+        // the speech backend, so the user heard the body then the button stomping on it. Combining into a
+        // single Say(interrupt:true) guarantees "body. button" reads in order regardless of queue timing.
+        _groups[_activeGroup].FocusFirst(announce: false);
+        SpeakWithFocusedItem(description);
+    }
+
+    // Speak an optional preamble (the modal title/body) immediately followed by the focused item, as a
+    // single interrupting utterance — no reliance on same-frame speech queueing.
+    private void SpeakWithFocusedItem(string description)
+    {
+        var item = _activeGroup >= 0 && _activeGroup < _groups.Count
+            ? _groups[_activeGroup].CurrentItemSpeech()
+            : null;
+        string combined =
+            !string.IsNullOrWhiteSpace(description) && !string.IsNullOrWhiteSpace(item) ? $"{description}. {item}"
+            : !string.IsNullOrWhiteSpace(description) ? description!
+            : item ?? "";
+        if (!string.IsNullOrWhiteSpace(combined))
+            _router.Speech.Say(combined, interrupt: true);
     }
 
     public void OnResume()
@@ -154,9 +172,9 @@ internal sealed class ModalContainerScreen : IScreenHandler
         var title = ReadTmpText(titleText) ?? "";
         var bodyText = BuildBodyText(titleText);
         var description = BuildPreamble(title, bodyText);
-        if (!string.IsNullOrWhiteSpace(description))
-            _router.Speech.Say(description!, interrupt: true);
-        _groups[_activeGroup].RefocusCurrent(announce: true);
+        // Re-select the current item silently, then speak body + item as one utterance (see OnEnter).
+        _groups[_activeGroup].RefocusCurrent(announce: false);
+        SpeakWithFocusedItem(description);
     }
 
     public string StateSignature()
@@ -201,14 +219,20 @@ internal sealed class ModalContainerScreen : IScreenHandler
         return $"{title}. {body}";
     }
 
-    // The modal's message text, gathered from two sources and deduped by GameObject:
+    // The modal's message text, gathered from three sources and deduped by GameObject:
+    //  0. The dedicated `bodyText` LocText field. This is the authoritative body for popups built via
+    //     SetupModalPopup with a bodyLocID (e.g. the logout confirm — "overflow_loggedout_body"). It
+    //     MUST be read directly: the whole modal sits under the blocker Button, so the heuristic
+    //     container scan below (which rejects any text under a Selectable, to skip button labels) drops
+    //     it, and it isn't a CurrentOption either — so without this the body went unspoken.
     //  1. Plain TMP children of the container — excludes button labels via the Selectable-ancestor filter.
     //  2. The modal's CurrentOptions — the spawned message options (SimpleMessageModalOption, etc.). The
-    //     match-action confirmations ("you still have selections", concede warning) put their body in such
-    //     an option, and the container scan misses it because the whole modal sits under the blocker
-    //     Button, so every text reads as "under a Selectable". For PASSIVE options (no Selectable on the
-    //     option root = not a button/toggle) we take the text directly, ignoring that ancestor filter; if
-    //     a LocText hasn't pushed to its TMP yet we resolve it from CurrentText / its resourceId.
+    //     match-action confirmations ("you still have selections", concede warning) and the
+    //     language/resolution confirms put their body in such an option, and the container scan misses it
+    //     for the same under-the-blocker reason. For PASSIVE options (no Selectable on the option root =
+    //     not a button/toggle) we take the text directly, ignoring that ancestor filter.
+    //  In every case, if a LocText hasn't pushed to its TMP yet we resolve it from CurrentText / its
+    //  resourceId.
     private string BuildBodyText(LocText? titleText)
     {
         if (_modal == null) return "";
@@ -236,6 +260,14 @@ internal sealed class ModalContainerScreen : IScreenHandler
                 }
             }
             if (!string.IsNullOrWhiteSpace(txt)) parts.Add((ReadingOrder(t.transform), txt.Trim()));
+        }
+
+        // 0. Dedicated body field (allow under-Selectable — it lives under the blocker like everything else).
+        var bodyLoc = ReadField<LocText>(_modal, "bodyText");
+        if (bodyLoc != null)
+        {
+            var bodyTmp = bodyLoc.GetComponent<TMP_Text>() ?? bodyLoc.GetComponentInChildren<TMP_Text>(includeInactive: true);
+            if (bodyTmp != null) Consider(bodyTmp, allowUnderSelectable: true);
         }
 
         foreach (var t in _modal.GetComponentsInChildren<TMP_Text>(includeInactive: false))

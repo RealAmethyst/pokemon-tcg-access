@@ -274,6 +274,11 @@ internal sealed class KeyboardNavigator : INavSection
     public void FocusFirstRow(int preferredColumn = -1, bool announce = true, bool interruptPrior = true)
     {
         if (_items.Count == 0) return;
+        // Per-section memory: if this section already has a focus position, return to it rather than
+        // recomputing from the section we came from. This keeps each section independent — navigating
+        // one section never shifts focus in another (the bug the preferredColumn projection caused).
+        // The column projection below is only the first-visit fallback (no remembered position yet).
+        if (RestoreRemembered(announce, interruptPrior)) return;
         var rowEnd = Mathf.Min(Columns - 1, _items.Count - 1);
         var target = (preferredColumn < 0) ? 0 : Mathf.Min(preferredColumn, rowEnd);
         if (IsActiveInHierarchy(_items[target]))
@@ -290,6 +295,20 @@ internal sealed class KeyboardNavigator : INavSection
             }
     }
 
+    // Restore the section's own remembered focus (set the last time the user was in it) if it's still
+    // valid. Returns true when it did. Announces with the group name, so escaping into a section reads
+    // "<section>. <item>" just like a fresh entry. Used as the first step of FocusFirstRow/FocusLastRow
+    // so per-section position survives moving away and back.
+    private bool RestoreRemembered(bool announce, bool interruptPrior)
+    {
+        if (_index >= 0 && _index < _items.Count && IsActiveInHierarchy(_items[_index]))
+        {
+            SetIndex(_index, announce, interrupt: interruptPrior, announceGroup: true);
+            return true;
+        }
+        return false;
+    }
+
     // Focus the last (visual) row, preserving column where possible. Used by screen handlers
     // on an Up-escape into this group from the section below — landing in the bottom row
     // matches the visual flow (closest to where the user came from), instead of jumping to
@@ -297,6 +316,8 @@ internal sealed class KeyboardNavigator : INavSection
     public void FocusLastRow(int preferredColumn = -1, bool announce = true, bool interruptPrior = true)
     {
         if (_items.Count == 0) return;
+        // Per-section memory first (see FocusFirstRow); column projection is the first-visit fallback.
+        if (RestoreRemembered(announce, interruptPrior)) return;
         var lastRowStart = ((_items.Count - 1) / Columns) * Columns;
         var rowEnd = Mathf.Min(lastRowStart + Columns - 1, _items.Count - 1);
         var target = (preferredColumn < 0) ? lastRowStart : Mathf.Min(lastRowStart + preferredColumn, rowEnd);
@@ -583,6 +604,21 @@ internal sealed class KeyboardNavigator : INavSection
         if (sel == null) return;
         var label = _resolveLabel(sel);
         _speech.Say(Announce.Item(label, description: null, index: _index + 1, total: _items.Count), interrupt);
+    }
+
+    // The exact text Speak() would announce for the current item (optionally prefixed with the group
+    // name), returned WITHOUT speaking. Lets a handler fold the focused item into a single utterance
+    // with a preamble — e.g. a modal speaking "body. button" in one Say(interrupt:true) — which
+    // guarantees order without relying on same-frame queueing (interrupt:false after a long
+    // interrupt:true utterance was getting cut off by some speech backends).
+    public string? CurrentItemSpeech(bool includeGroupName = true)
+    {
+        var sel = Current;
+        if (sel == null) return null;
+        var item = Announce.Item(_resolveLabel(sel), description: null, index: _index + 1, total: _items.Count);
+        if (includeGroupName && !string.IsNullOrEmpty(GroupName))
+            return $"{GroupName}. {item}";
+        return item;
     }
 
     public static string DefaultLabel(Selectable s)
