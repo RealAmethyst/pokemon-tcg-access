@@ -256,7 +256,10 @@ The outer Profile screen and every inner avatar customization category panel are
    pattern as Profile. Lower priority than battle but still needed for full HUB coverage:
    - `HUBHomeController` (HOME)
    - `HUBDeckSelectController` (DECKS)
-   - `HUBShopController` (SHOP)
+   - **SHOP — rebuilt 2026-06-01** (`HUBShopScreenController`): per-collection sections across
+     BUNDLES/EXPANSIONS/REDEEM, products read "name, price, N available", purchase + view-all
+     overlays, global `P` reads currency balances. See memory `project_shop_system.md`. Pending
+     in-game verification.
    - `HUBExpansionChallengeScreenController` (BATTLE PASS)
    - `HUBCardDexController` (CARD DEX)
 

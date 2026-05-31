@@ -35,6 +35,13 @@ internal sealed class KeyboardNavigator : INavSection
     private readonly PointerEventData _pointerData;
     private readonly List<RaycastResult> _raycastResults = new(8);
 
+    // Character echo for the focused text field (no OS-level echo exists for Unity input fields).
+    private TMPro.TMP_InputField? _echoTmp;
+    private InputField? _echoLegacy;
+    private string _echoPrev = string.Empty;
+    private int _caretPrev = -1;
+    private string _caretPrevText = string.Empty;
+
     // Axis config — default: vertical-only list nav. Set Horizontal / Tab true per-screen for grids / tab strips.
     public bool AllowVertical { get; set; } = true;
     public bool AllowHorizontal { get; set; } = false;
@@ -154,6 +161,7 @@ internal sealed class KeyboardNavigator : INavSection
 
     public void SetItems(IEnumerable<Selectable> items, LabelResolver? resolver = null)
     {
+        UnwireEcho();
         _items.Clear();
         foreach (var s in items)
             if (s != null) _items.Add(s);
@@ -399,12 +407,20 @@ internal sealed class KeyboardNavigator : INavSection
 
         if (_items.Count == 0) return;
 
+        // While the focus is in a text field, arrows / Enter / Space belong to the FIELD (caret
+        // movement, a typed space, submit) — never nav, or you'd be ejected from the field before
+        // you could type. Tab still moves (so AllowTab groups exit the field); Escape / Backspace
+        // were handled above. Handlers that own Tab themselves (section-stack screens) give the
+        // user a Tab-to-exit by checking CurrentIsTextField. See [[feedback-input-field-activation]].
+        bool editing = CurrentIsTextField;
+        if (editing) PollCaretEcho();   // voice the character the caret crosses on Left/Right
+
         if (AllowTab && UnityEngine.Input.GetKeyDown(KeyCode.Tab))
         {
             var shift = UnityEngine.Input.GetKey(KeyCode.LeftShift) || UnityEngine.Input.GetKey(KeyCode.RightShift);
             if (shift) MovePrev(); else MoveNext();
         }
-        else if (AllowVertical && UnityEngine.Input.GetKeyDown(KeyCode.DownArrow))
+        else if (!editing && AllowVertical && UnityEngine.Input.GetKeyDown(KeyCode.DownArrow))
         {
             // Grid layouts: jump by Columns so Down lands in the column below. For partial
             // last rows (e.g. 6 items in a 5-column grid) MoveVerticalInGrid clamps the
@@ -412,11 +428,11 @@ internal sealed class KeyboardNavigator : INavSection
             // through Face 5 still reaches Face 6 instead of being a no-op.
             MoveVerticalInGrid(+1);
         }
-        else if (AllowVertical && UnityEngine.Input.GetKeyDown(KeyCode.UpArrow))
+        else if (!editing && AllowVertical && UnityEngine.Input.GetKeyDown(KeyCode.UpArrow))
         {
             MoveVerticalInGrid(-1);
         }
-        else if (AllowHorizontal && UnityEngine.Input.GetKeyDown(KeyCode.RightArrow))
+        else if (!editing && AllowHorizontal && UnityEngine.Input.GetKeyDown(KeyCode.RightArrow))
         {
             // sameRowOnly: in a grid, Right from the last item of a row must NOT wrap to
             // the first item of the next row. For flat horizontal strips Columns equals
@@ -424,20 +440,24 @@ internal sealed class KeyboardNavigator : INavSection
             // possible there anyway.
             MoveBy(1, sameRowOnly: true);
         }
-        else if (AllowHorizontal && UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow))
+        else if (!editing && AllowHorizontal && UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow))
         {
             MoveBy(-1, sameRowOnly: true);
         }
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.Return)
-              || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter))
+        else if (!editing && (UnityEngine.Input.GetKeyDown(KeyCode.Return)
+              || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)))
         {
             Activate(isSpaceKey: false);
         }
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.Space))
+        else if (!editing && UnityEngine.Input.GetKeyDown(KeyCode.Space))
         {
             Activate(isSpaceKey: true);
         }
     }
+
+    // True when the focused item is a text input — used here to hand keys to the field, and by
+    // section-stack handlers to switch Tab from "cycle sections" to "exit the field".
+    public bool CurrentIsTextField => IsTextField(Current);
 
     // Grid-aware vertical move: stays in the same column when possible, but if the target
     // row is partial and doesn't have that column, clamps to the row's last item. Mirrors
@@ -500,9 +520,10 @@ internal sealed class KeyboardNavigator : INavSection
 
     private void SetIndex(int i, bool announce, bool interrupt, bool announceGroup)
     {
+        UnwireEcho();
         _index = i;
         var sel = _items[_index];
-        if (sel != null) sel.Select();
+        if (sel != null) { sel.Select(); ActivateIfInputField(sel); WireEcho(sel); }
         if (!announce) return;
         if (announceGroup && !string.IsNullOrEmpty(GroupName))
         {
@@ -539,6 +560,92 @@ internal sealed class KeyboardNavigator : INavSection
     {
         if (!IsNavigable(s)) return false;
         return s!.interactable;
+    }
+
+    // Selecting a text field highlights it but doesn't start editing — uGUI needs the field
+    // *activated* before it captures typed characters and shows a caret. So on focus we activate
+    // any InputField, the way a mouse click would, so the user can type immediately (redeem code,
+    // deck name, search box). Moving focus away deselects it, which ends editing.
+    private static void ActivateIfInputField(Selectable s)
+    {
+        if (s is TMPro.TMP_InputField tmp) tmp.ActivateInputField();
+        else if (s is InputField legacy) legacy.ActivateInputField();
+    }
+
+    // Speak each character as it's typed into the focused field (Unity input fields get no OS-level
+    // echo, so a blind user otherwise types blind). Wired on focus, removed when focus leaves.
+    private void WireEcho(Selectable? s)
+    {
+        if (s is TMPro.TMP_InputField tmp)
+        {
+            _echoTmp = tmp;
+            _echoPrev = tmp.text ?? string.Empty;
+            tmp.onValueChanged.AddListener(OnEchoChanged);
+        }
+        else if (s is InputField legacy)
+        {
+            _echoLegacy = legacy;
+            _echoPrev = legacy.text ?? string.Empty;
+            legacy.onValueChanged.AddListener(OnEchoChanged);
+        }
+        _caretPrev = -1;
+        _caretPrevText = _echoPrev;
+    }
+
+    private void UnwireEcho()
+    {
+        if (_echoTmp != null) { _echoTmp.onValueChanged.RemoveListener(OnEchoChanged); _echoTmp = null; }
+        if (_echoLegacy != null) { _echoLegacy.onValueChanged.RemoveListener(OnEchoChanged); _echoLegacy = null; }
+        _echoPrev = string.Empty;
+        _caretPrev = -1;
+        _caretPrevText = string.Empty;
+    }
+
+    private void OnEchoChanged(string newText)
+    {
+        newText ??= string.Empty;
+        if (newText.Length > _echoPrev.Length && newText.StartsWith(_echoPrev))
+            _speech.Say(EchoText(newText.Substring(_echoPrev.Length)), interrupt: true);
+        else if (newText.Length < _echoPrev.Length && _echoPrev.StartsWith(newText))
+            _speech.Say(EchoText(_echoPrev.Substring(newText.Length)) + " deleted", interrupt: true);
+        else if (newText.Length != _echoPrev.Length)
+            _speech.Say(newText.Length > _echoPrev.Length ? "inserted" : "deleted", interrupt: true);
+        _echoPrev = newText;
+    }
+
+    // Speak the character the caret crosses on Left/Right (Unity gives no caret read-out). Polled
+    // each frame while a field is focused: when the caret moves but the text is unchanged (pure
+    // caret nav, not typing — typing is voiced by OnEchoChanged), announce the crossed character.
+    private void PollCaretEcho()
+    {
+        var (text, caret) = GetTextAndCaret();
+        if (caret < 0) return;
+        if (text != _caretPrevText) { _caretPrevText = text; _caretPrev = caret; return; }  // typing — handled elsewhere
+        if (_caretPrev >= 0 && caret != _caretPrev)
+        {
+            int lo = Mathf.Min(caret, _caretPrev);
+            if (Mathf.Abs(caret - _caretPrev) == 1 && lo >= 0 && lo < text.Length)
+                _speech.Say(EchoText(text[lo].ToString()), interrupt: true);   // the character crossed
+            else if (caret >= 0 && caret < text.Length)
+                _speech.Say(EchoText(text[caret].ToString()), interrupt: true);
+            else
+                _speech.Say(caret >= text.Length ? "end" : "start", interrupt: true);
+        }
+        _caretPrev = caret;
+        _caretPrevText = text;
+    }
+
+    private (string text, int caret) GetTextAndCaret()
+    {
+        if (_echoTmp != null) return (_echoTmp.text ?? string.Empty, _echoTmp.caretPosition);
+        if (_echoLegacy != null) return (_echoLegacy.text ?? string.Empty, _echoLegacy.caretPosition);
+        return (string.Empty, -1);
+    }
+
+    private static string EchoText(string s)
+    {
+        s = s.Trim();
+        return s.Length == 0 ? "space" : s;
     }
 
     // Don't eat Backspace if the user is typing in a text field (deck name editor, search box, etc.).
@@ -606,16 +713,54 @@ internal sealed class KeyboardNavigator : INavSection
         var sel = Current;
         if (sel == null) return;
         var label = _resolveLabel(sel);
-        _speech.Say(Announce.Item(label, description: null, index: _index + 1, total: _items.Count), interrupt);
+        // A text field is announced by its label alone — it's not a numbered list item, and it's
+        // excluded from the "X of Y" the other items report (so a field among 4 buttons leaves them
+        // reading "1 of 4", not "of 5").
+        if (IsTextField(sel)) { _speech.Say(label, interrupt); return; }
+        int total = 0, index = 0;
+        for (int i = 0; i < _items.Count; i++)
+        {
+            if (IsTextField(_items[i])) continue;
+            total++;
+            if (i <= _index) index = total;
+        }
+        _speech.Say(Announce.Item(label, description: null, index: index, total: total), interrupt);
     }
+
+    private static bool IsTextField(Selectable? s) => s is TMPro.TMP_InputField || s is InputField;
 
     public static string DefaultLabel(Selectable s)
     {
+        // A text input announces its purpose (placeholder/label) + current contents + the "edit
+        // field" role, so the user knows it's typable and can review what they've entered.
+        if (s is TMPro.TMP_InputField || s is InputField)
+            return InputFieldLabel(s);
+
         var label = ResolveBaseLabel(s);
         if (s is Toggle toggle)
             label = $"{label}, {(toggle.isOn ? "checked" : "unchecked")}";
         if (!s.interactable)
             label = $"{label}, unavailable";
+        return label;
+    }
+
+    private static string InputFieldLabel(Selectable s)
+    {
+        string? placeholder = null, text = null;
+        if (s is TMPro.TMP_InputField tmp)
+        {
+            text = tmp.text;
+            if (tmp.placeholder is TMPro.TMP_Text ph) placeholder = ph.text;
+        }
+        else if (s is InputField legacy)
+        {
+            text = legacy.text;
+            if (legacy.placeholder is Text ph) placeholder = ph.text;
+        }
+        var name = !string.IsNullOrWhiteSpace(placeholder) ? placeholder!.Trim() : Humanize(s.gameObject.name);
+        var content = string.IsNullOrWhiteSpace(text) ? "blank" : text!.Trim();
+        var label = $"{name}, {content}, edit field";
+        if (!s.interactable) label = $"{label}, unavailable";
         return label;
     }
 

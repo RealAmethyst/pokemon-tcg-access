@@ -36,6 +36,8 @@ public class Mod : MelonMod
         _windowFix = new WindowFix();
         _router = new ScreenRouter(_speech);
 
+        CurrencyReader.Install(_speech);
+
         LocalizationHook.Install(HarmonyInstance, _speech);
         BattleLogHook.Install(HarmonyInstance, _speech);
         FTUEHook.Install(HarmonyInstance);
@@ -51,9 +53,12 @@ public class Mod : MelonMod
         HUBProfileScreen.Install(HarmonyInstance, _router);
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);
+        ShopProductOverlayScreen.Install(HarmonyInstance, _router);
+        BundlesOverlayScreen.Install(HarmonyInstance, _router);
         HUBDeckSelectScreen.Install(HarmonyInstance, _router);
         HUBEditDeckScreen.Install(HarmonyInstance, _router);
         ItemGrantScreen.Install(HarmonyInstance, _router);
+        ErrorOverlayScreen.Install(HarmonyInstance, _router);
         RewardOverlayScreen.Install(HarmonyInstance, _router);
         GiftOverlayScreen.Install(HarmonyInstance, _router);
         NewsOverlayScreen.Install(HarmonyInstance, _router);
@@ -76,6 +81,8 @@ public class Mod : MelonMod
         // Handlers that activate via async / coroutine-driven game state poll here each frame.
         ConsentScreen.Poll();
         _router?.Tick();
+        // Global "read my balances" key (P) — acts only on screens showing the HUB currency bar.
+        CurrencyReader.Tick();
         // Global FTUE-focus fallback: surfaces the tutorial's highlighted element on screens we
         // don't handle yet. No-ops whenever a screen handler is active (checks _router.Active).
         FtueFocusFallback.Tick();

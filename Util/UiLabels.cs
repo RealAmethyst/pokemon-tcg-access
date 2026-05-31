@@ -1,7 +1,5 @@
 using System.Collections.Generic;
 using System.Reflection;
-using System.Text;
-using TPCI.Localization;
 using UnityEngine.UI;
 
 namespace PokemonTCGLiveAccessibility.Util;
@@ -45,24 +43,17 @@ internal static class UiLabels
         return label;
     }
 
-    // Rich label for composite widgets. Currently: a shop product tile (ShopProductController) —
-    // the FTUE focuses `product.GetComponentInChildren<Button>()`, so the focused control sits
-    // INSIDE the product; its own text is just a price or icon ("Button"/"200"). Read the tile's
-    // title + cost instead → "Chaos Rising Booster Pack, 200". Returns null when not applicable.
+    // Rich label for composite widgets. Returns null when not applicable (caller falls back to
+    // text-scraping / humanized name).
     public static string? Describe(Selectable s)
     {
         if (s == null) return null;
 
-        // Shop product tile (booster pack, collection, …) → "name, price".
+        // Shop product tile (booster pack, bundle, collection, …) → "name, price, N available".
+        // The focused control sits INSIDE the tile (its own text is just a price/icon), so we read
+        // the owning ShopProductController. See ShopLabels.
         var product = s.GetComponentInParent<ShopProductController>();
-        if (product != null)
-        {
-            var name = Clean(product.titleText);
-            var cost = Clean(product.costTxt);
-            if (name.Length > 0 && cost.Length > 0) return $"{name}, {cost}";
-            if (name.Length > 0) return name;
-            if (cost.Length > 0) return cost;
-        }
+        if (product != null) return ShopLabels.Product(product);
 
         // Shop expansion tile (selects a set to shop; shows collection progress as "11/122") →
         // "Expansion, 11 of 122 cards collected". The button lives inside an ExpansionSelection;
@@ -72,42 +63,43 @@ internal static class UiLabels
         {
             int owned = ReadInt(expansion, "ownedCollectionCount");
             int max = ReadInt(expansion, "maxCollectionCount");
-            return (max > 0) ? $"Expansion, {owned} of {max} cards collected" : "Expansion";
+            var name = ShopLabels.ExpansionName(expansion);
+            var head = string.IsNullOrEmpty(name) ? "Expansion" : name!;
+            return (max > 0) ? $"{head}, {owned} of {max} cards collected" : head;
         }
 
-        // Other controls in the expansion view — chiefly the drawer button that opens the set picker.
-        if (s.GetComponentInParent<ShopPageExpansionsScreen>() != null)
+        // Shop collection-header tooltip "(i)" button (icon-only, on RECOMMENDED / NEW ARRIVALS):
+        // it sits under the ShopProductCollection but outside any product tile and has no worded
+        // text, so name it by its section instead of reading a bare "info".
+        var collection = s.GetComponentInParent<ShopProductCollection>();
+        if (collection != null && s.GetComponentInParent<ShopProductController>() == null && !HasLetterTextChild(s))
+            return ShopLabels.CollectionTitle(collection) + ", information";
+
+        // Icon-only control in the expansion view — chiefly the drawer button that opens the set
+        // picker. Text-bearing controls there (series-filter buttons) keep their own label.
+        if (s.GetComponentInParent<ShopPageExpansionsScreen>() != null && !HasLetterTextChild(s))
             return "Choose expansion";
 
         return null;
+    }
+
+    private static bool HasLetterTextChild(Selectable s)
+    {
+        foreach (var t in s.GetComponentsInChildren<TMPro.TMP_Text>(includeInactive: false))
+            if (HasLetter(t.text)) return true;
+        return false;
+    }
+
+    private static bool HasLetter(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return false;
+        foreach (var c in s!) if (char.IsLetter(c)) return true;
+        return false;
     }
 
     private static int ReadInt(object o, string field)
     {
         var f = o.GetType().GetField(field, BindingFlags.Instance | BindingFlags.NonPublic);
         return f?.GetValue(o) is int n ? n : -1;
-    }
-
-    private static string Clean(LocText? t)
-    {
-        if (t == null) return "";
-        var s = t.CurrentText;
-        return string.IsNullOrWhiteSpace(s) ? "" : StripTags(s!).Trim();
-    }
-
-    // Strip TMP rich-text / sprite tags (<sprite=…>, <color>, …) so a price like "<sprite>200"
-    // reads as "200" rather than leaking the markup.
-    private static string StripTags(string s)
-    {
-        if (s.IndexOf('<') < 0) return s;
-        var sb = new StringBuilder(s.Length);
-        bool inTag = false;
-        foreach (var c in s)
-        {
-            if (c == '<') inTag = true;
-            else if (c == '>') inTag = false;
-            else if (!inTag) sb.Append(c);
-        }
-        return sb.ToString();
     }
 }
