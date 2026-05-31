@@ -668,11 +668,23 @@ internal sealed class BattleScreen : IScreenHandler
         // While the game is waiting on a local selection, starting a new action would desync — block it.
         if (_localSelecting)
         { _router.Speech.Say("Finish the current selection first", interrupt: true); return; }
+        // Re-read the zone before acting: an earlier action (e.g. attaching energy via Excited Turbo)
+        // churns card ownership, which can leave the cached _zoneCards holding a stale/null reference
+        // for a slot. Refreshing here picks up the live Card3D so Enter on the Active spot acts on the
+        // real Pokémon instead of silently no-oping on a dead reference.
+        RefreshZoneCards();
+
         if (_zoneCards == null || _card < 0 || _card >= _zoneCards.Count)
         { _router.Speech.Say("Nothing to act on", interrupt: true); return; }
 
         var card = _zoneCards[_card];
-        if (card == null) return;
+        if (card == null)
+        {
+            // Stale/empty slot even after refresh — tell the player instead of silently doing nothing
+            // (the "frozen, Enter does nothing on my Active" symptom).
+            _router.Speech.Say("Nothing to act on", interrupt: true);
+            return;
+        }
 
         // Tutorial guard: only act on cards the tutorial currently PERMITS. DoesFTUEPermitCardTargetability
         // is the game's own rule — TRUE in free play (the guided part is over and you play freely to win),
@@ -737,7 +749,18 @@ internal sealed class BattleScreen : IScreenHandler
         try
         {
             var overlay = _manager?.attackOverlay;
-            if (overlay != null && !overlay.isOpen) overlay.Show(card);
+            if (overlay == null) return;
+            // ALWAYS point the overlay at the FOCUSED card — exactly what a sighted player gets by
+            // clicking that Pokémon. The game's AttackOverlay.Show only populates when currentCard is
+            // null (`if (!(currentCard != null))`), so calling Show on an overlay already open for a
+            // DIFFERENT Pokémon is a NO-OP — it keeps the previous card's attack/ability options. That's
+            // the freeze: after using Oricorio ex's Excited Turbo the overlay stayed open on Oricorio,
+            // so opening Mega Charizard X's menu still listed Excited Turbo, and invoking it fired
+            // Oricorio's ability out of context → desync. Close() flips isOpen=false and nulls
+            // currentCard synchronously (BattleMenu.Close + AttackOverlay.OnClose), so closing first
+            // then Show(card) cleanly repopulates for the focused card.
+            if (overlay.isOpen && overlay.currentCard != card) overlay.Close();
+            if (!overlay.isOpen) overlay.Show(card);
         }
         catch (Exception ex) { Log.Error($"BattleScreen: AttackOverlay.Show threw: {ex.Message}"); }
     }
@@ -797,6 +820,11 @@ internal sealed class BattleScreen : IScreenHandler
             _mode = Mode.Nav;
             try { action.Invoke(); }   // result narrated by the battle log (localized); no echo from us
             catch (Exception ex) { Log.Error($"BattleScreen action '{action.Label}' threw: {ex.Message}"); }
+            // The overlay's own option click closes it (HandleOverlayActionClickCleanup), but a retreat
+            // or an ability that leaves it open would otherwise linger on this card and re-surface as
+            // stale options on the NEXT Pokémon's menu. Close defensively so the overlay never carries a
+            // stale currentCard between Pokémon (the Excited-Turbo-on-Charizard freeze). No-op if already closed.
+            TryCloseAttackOverlay();
             return;
         }
     }
@@ -825,7 +853,11 @@ internal sealed class BattleScreen : IScreenHandler
             // option's OnClick() is the exact sighted-player flow (→ TryUseAction → confirmations →
             // op) and is what the FTUE watches — never our own UseCard.
             var overlay = _manager.attackOverlay;
-            if (overlay == null || !overlay.isOpen) return list;   // overlay must be open (Show ran)
+            // The overlay must be open AND showing THIS card. The currentCard guard is the safety net
+            // for the stale-overlay bug (see TryOpenAttackOverlay): if Show didn't re-point — e.g. a
+            // mid-animation Close left it briefly on the old card — we must NOT read another Pokémon's
+            // options onto this one. No match → no actions (caller closes + says "No actions").
+            if (overlay == null || !overlay.isOpen || overlay.currentCard != card) return list;
 
             if (overlay.AttackOptions != null)
                 foreach (var opt in overlay.AttackOptions) AddOverlayOption(list, opt, "Attack", card);
@@ -864,6 +896,12 @@ internal sealed class BattleScreen : IScreenHandler
     private void AddOverlayOption(List<BattleAction> list, CardActionOption opt, string prefix, Card3D card)
     {
         if (opt == null) return;
+        // The overlay POOLS its option widgets: AttackOptions / AbilityOptions keep leftover entries from
+        // a previously-shown Pokémon and just SetActive(false) the ones the current card doesn't have
+        // (SetupAbilities/SetupAttacks/HideAttacksForBenchedPokemon). A sighted player never sees those —
+        // so we must skip any whose GameObject is inactive, or a phantom option from another Pokémon
+        // leaks in (e.g. Oricorio ex's Excited Turbo showing on Mega Charizard X, which has no ability).
+        if (!opt.gameObject.activeInHierarchy) return;
         var action = opt.MatchAction;
         string nm = action != null && !string.IsNullOrEmpty(action.actionName) ? action.actionName : prefix;
         bool ok = OptionUsable(opt);

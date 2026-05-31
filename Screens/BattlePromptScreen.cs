@@ -373,11 +373,44 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _entityMax = esel.totalMaxAmount < 1 ? 1 : esel.totalMaxAmount;
         _target = _entityMax;
         // Build the card options to match what a sighted player sees:
-        if (_entityClickMenu)
+        if (_entityClickMenu && _bacsMenu == null)
         {
-            // Board-attached ("discard Fire Energy off your Pokémon"): ONE option per energy, tagged with
-            // its PARENT Pokémon (spoken as a section name, see SpeakOption) and grouped by parent so all
-            // of one Pokémon's energy reads consecutively.
+            // Plain AttachedCardSelectionMenu ("Discard any Fire Energy from among your Pokémon", e.g.
+            // Mega Charizard X's Inferno X). The energy is lifted into a temp HAND (ReparentHandController)
+            // that STACKS identical cards PER POKÉMON — only each stack's FRONT is targetable. So collapse
+            // the energy into one option per (name, parent Pokémon) — the "each Pokémon gets its own stack"
+            // model — and peel the front on each press (MarkAttachedHandStack). The old per-card path
+            // (GetCard(eid)+TryTargetCard on every buried energy) failed for all but the one card that
+            // happened to be the front (3 of 4 acted=False), so only one energy could ever be discarded.
+            var stacks = new Dictionary<(string name, string parent), List<string>>();
+            var order = new List<(string name, string parent)>();
+            foreach (var group in esel.selectionGroups)
+            {
+                if (group == null) continue;
+                foreach (var opt in group.validOptions)
+                {
+                    string eid = opt.cardAddress.entityID;
+                    string parentEid = opt.parentEntityID ?? "";
+                    string name = ResolveName(eid);
+                    var key = (name, parentEid);
+                    if (!stacks.TryGetValue(key, out var eids)) { eids = new List<string>(); stacks[key] = eids; order.Add(key); }
+                    eids.Add(eid);
+                }
+            }
+            // Order by parent so each Pokémon's energy reads consecutively (parent = spoken section name).
+            foreach (var key in order.OrderBy(k => k.parent, StringComparer.Ordinal))
+            {
+                var (name, parentEid) = key;
+                string? parentName = !string.IsNullOrEmpty(parentEid) ? ResolveParentName(parentEid) : null;
+                string cn = name; string cp = parentEid; var eids = stacks[key];
+                _options.Add(new Option { Name = name, Parent = parentName, Eid = eids[0], StackEids = eids, Choose = () => MarkAttachedHandStack(cn, cp, eids) });
+            }
+        }
+        else if (_entityClickMenu)
+        {
+            // BoardAttachedCardSelectionMenu (distribute one Pokémon at a time): ONE option per energy,
+            // tagged with its PARENT Pokémon (spoken as a section name, see SpeakOption) and grouped by
+            // parent. Selection defers until the parent is the open one (MarkEntity → TickPendingEnergySelect).
             var cardOpts = new List<(string sortKey, Option opt)>();
             foreach (var group in esel.selectionGroups)
             {
@@ -631,6 +664,45 @@ internal sealed class BattlePromptScreen : IScreenHandler
         AnnounceSelectionResult(prev, name, acted);
     }
 
+    // Select the next energy from one Pokémon's attached-energy stack (plain AttachedCardSelectionMenu —
+    // "discard any Fire Energy from among your Pokémon"). The energy sits in a temp HAND that stacks
+    // identical cards and only exposes each stack's FRONT to targeting; the front isn't identifiable up
+    // front (the hand owner returns ALL its cards, not just tops), but TryTargetCard on a buried card is
+    // a harmless no-op (returns false, changes nothing — verified in the log). So peel the front the
+    // robust native way: walk this pile's unselected eids and TryTargetCard each until one takes — that
+    // one IS the current front, and it's the exact call a real click makes. One per press; Done finishes.
+    private void MarkAttachedHandStack(string name, string parentEid, List<string> eids)
+    {
+        if (_entityOverlay == null || _mgr == null) return;
+        var th = _mgr.TargetingHandler;
+        if (th == null) return;
+        int prev = TotalSelected();
+        try { th.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: RefreshPlacementContext threw: {ex.Message}"); }
+
+        bool acted = false;
+        string actedEid = "";
+        foreach (var eid in eids)
+        {
+            if (IsSelectedEid(eid)) continue;                 // already discarded — skip
+            var card = _mgr.GetCard(eid);
+            if (card == null) continue;
+            card = ResolveTargetableCard(card);               // no-op for a hand owner, but safe
+            try { acted = th.TryTargetCard(card, ClickReleaseAutoPlacementInitiator.ReusableInitiator); }
+            catch (Exception ex) { Log.Error($"BattlePrompt: attached TryTargetCard threw: {ex.Message}"); }
+            if (acted) { actedEid = eid; break; }             // hit the current front
+        }
+        Log.Info($"BattlePrompt attached '{name}' parent={parentEid} acted={acted} eid={actedEid} selected={TotalSelected()}/{_entityMax}");
+
+        if (!acted && TotalSelected() == prev)
+        {
+            // Nothing took and nothing changed → every energy of this pile is already chosen. State it
+            // (not a failure) so the player moves on / presses Done.
+            _router.Speech.Say($"No more {name} to choose, {TotalSelected()} of {_entityMax} chosen", interrupt: true);
+            return;
+        }
+        AnnounceSelectionResult(prev, name, acted);
+    }
+
     // The current targetable TOP card of a pile (matched by displayed name). A real click only ever
     // hits a stack's CURRENT FRONT: SelectionCardOwner.OnCardClicked → GetFrontCardOfStackThatHoldsCard
     // → TryTargetCard(front). So we must return a genuine live front of the UNSELECTED (source) side —
@@ -652,6 +724,8 @@ internal sealed class BattlePromptScreen : IScreenHandler
         Card3D? front = null;
         try
         {
+            // Pile sources backed by a SelectionCardOwner (deck search, attached lists): their
+            // GetCardsAccessibleForTargeting() is exactly the per-stack fronts.
             foreach (var owner in UnityEngine.Object.FindObjectsByType<SelectionCardOwner>(FindObjectsSortMode.None))
             {
                 if (owner == null || owner.AreHeldCardsConsideredSelected) continue;   // source / unselected side only
@@ -660,6 +734,23 @@ internal sealed class BattlePromptScreen : IScreenHandler
                     if (c == null || ResolveName(c.entityID) != name || IsSelectedEid(c.entityID)) continue;
                     if (focused != null && ReferenceEquals(c, focused)) return c;   // the forced-FTUE card, and it's a live front
                     front ??= c;                                                    // first genuine current front
+                }
+            }
+            if (front != null) return front;
+
+            // Discard-from-hand (HandSelectionOverlay: Ultra Ball "discard 2 cards", etc.) uses a
+            // HandFanController, which is a HandController — NOT a SelectionCardOwner — so the scan above
+            // misses it entirely (that was the "no targetable front" bug for every hand card). The hand's
+            // GetCardsAccessibleForTargeting() returns each slot's GetTopCard() (the targetable front of
+            // each stack), so consult the active overlay's hand the same way. Selecting a hand card is the
+            // identical native verb (TryTargetCard on that front).
+            if (_entityOverlay is IHandProvider hp && hp.Hand is { } hand)
+            {
+                foreach (var c in hand.GetCardsAccessibleForTargeting())
+                {
+                    if (c == null || ResolveName(c.entityID) != name || IsSelectedEid(c.entityID)) continue;
+                    if (focused != null && ReferenceEquals(c, focused)) return c;
+                    front ??= c;
                 }
             }
         }

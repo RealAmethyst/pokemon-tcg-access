@@ -99,6 +99,12 @@ internal sealed class ModalContainerScreen : IScreenHandler
             .Where(s => !(s is Scrollbar))
             .Where(s => s.gameObject.activeInHierarchy)
             .Where(s => !bottomSet.Contains(s))
+            // Skip card-graphic selectables: the Mulligans reveal (and any modal embedding card images)
+            // puts clickable CardUI cards in the body. They're click-to-zoom graphics, NOT menu controls
+            // — navigating them read "Card UI" junk and buried the real DONE button (the player couldn't
+            // tell there was a Done or how to proceed). We read card text elsewhere (MulliganRevealScreen
+            // announces the revealed cards), so drop them here; the bottom DONE/action buttons remain.
+            .Where(s => s.GetComponentInParent<CardUI>() == null)
             .OrderBy(s => ReadingOrder(s.transform))
             .ToList();
 
