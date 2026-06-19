@@ -210,7 +210,12 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         var panel = CallMethod<Component>(_controller, "GetDeckPanel");
         var detailItems = panel != null
             ? panel.GetComponentsInChildren<Selectable>(includeInactive: false)
-                .Where(s => (s is Button || s is Toggle) && s.isActiveAndEnabled)
+                // The detail panel requires a ModifiedDeckPanel, which spawns the deck's cards as
+                // CardStubParts children — exclude those (they have no readable label, just card-set
+                // ids like "sm12_001", and their row throws off the spatial nav). Leaves only the real
+                // option buttons (CUSTOMIZATION / TEST / DUPLICATE / VIEW / STATS / EXPORT / DELETE / …).
+                .Where(s => (s is Button || s is Toggle) && s.isActiveAndEnabled
+                            && s.GetComponentInParent<CardStubParts>() == null)
                 .OrderBy(s => ReadingOrder(s.transform)).ToList()
             : new List<Selectable>();
         _detailNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
