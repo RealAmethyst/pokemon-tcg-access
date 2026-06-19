@@ -36,8 +36,11 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     private readonly List<string> _lines = new();
     private int _lineIndex = -1;
 
-    private static readonly MethodInfo? CardGetter = AccessTools.PropertyGetter(typeof(BigCardOverlayController), "selectedCard");
-    private static readonly MethodInfo? StackGetter = AccessTools.PropertyGetter(typeof(BigCardOverlayController), "selectedStack");
+    // 1.5.0 renamed these protected properties to PascalCase (selectedCard -> SelectedCard); the
+    // getters are case-sensitive, so the old lowercase lookup returned null and the overlay couldn't
+    // read which card/stack was selected.
+    private static readonly MethodInfo? CardGetter = AccessTools.PropertyGetter(typeof(BigCardOverlayController), "SelectedCard");
+    private static readonly MethodInfo? StackGetter = AccessTools.PropertyGetter(typeof(BigCardOverlayController), "SelectedStack");
 
     public string Name => "Card details";
 
@@ -51,8 +54,11 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     {
         new AddCardOverlayScreen(router);
 
+        // 1.5.0 expanded Setup to 5 params (added preferredDisplayCard + archetypeChangedAction).
+        // BigCardOverlayController also declares a 2-param Setup, so name-only resolution is ambiguous —
+        // we must match the full signature exactly.
         var setup = AccessTools.Method(typeof(AddCardOverlayManager), "Setup",
-            new[] { typeof(ArchetypeDBCards), typeof(AddCardOverlayManager.CardLocation), typeof(GameMode) });
+            new[] { typeof(ArchetypeDBCards), typeof(ICardDataRow), typeof(AddCardOverlayManager.CardLocation), typeof(GameMode), typeof(AddCardOverlayManager.ArchetypeChangedDelegate) });
         if (setup == null)
         {
             Log.Error("AddCardOverlayScreen: could not resolve AddCardOverlayManager.Setup");

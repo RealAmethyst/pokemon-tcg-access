@@ -185,7 +185,7 @@ internal sealed class HUBOverflowSubOverlayScreen : IScreenHandler
         _active = false;
         try
         {
-            if (_overlayManager != null && _group != null && _overlayManager.IsOpenOverlay(_group))
+            if (_overlayManager != null && _group != null && _overlayManager.IsOverlayOpen(_group))
                 _overlayManager.CloseOverlay(_group);
         }
         catch (System.Exception ex) { Log.Error($"HUBOverflowSubOverlayScreen.Close threw: {ex.Message}"); }
@@ -196,7 +196,7 @@ internal sealed class HUBOverflowSubOverlayScreen : IScreenHandler
     private bool IsStillOpen()
     {
         if (_group == null) return false;
-        try { if (_overlayManager != null) return _overlayManager.IsOpenOverlay(_group); } catch { }
+        try { if (_overlayManager != null) return _overlayManager.IsOverlayOpen(_group); } catch { }
         return _group != null && _group.gameObject.activeInHierarchy;
     }
 

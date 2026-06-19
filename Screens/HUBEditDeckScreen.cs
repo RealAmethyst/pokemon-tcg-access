@@ -826,7 +826,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         }
         else
         {
-            _controller!.CollectionDrawer.GetCardButton(card.CardID, stub =>
+            // 1.5.0 removed PopulateCollectionDrawer.GetCardButton(id, cb); ScrollToCard(id, cb)
+            // is the replacement — scrolls the (virtualized) collection to the card and hands back
+            // its realized CardStubParts, whose CardButton we click to open the detail overlay.
+            _controller!.CollectionDrawer.ScrollToCard(card.CardID, stub =>
             {
                 if (stub != null && stub.CardButton != null) stub.CardButton.onClick.Invoke();
                 else Say("Can't open card details", interrupt: true);
