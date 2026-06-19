@@ -13,6 +13,13 @@
     <DebugType>portable</DebugType>
   </PropertyGroup>
 
+  <!-- The Updater\ subfolder is its own MelonLoader mod (separate process, separate assemblies);
+       it's built via Updater\PokemonTCGLiveUpdaterAccessibility.csproj. Keep its sources out of the
+       main mod's default-compile glob. -->
+  <ItemGroup>
+    <Compile Remove="Updater\**\*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="LavaGang.MelonLoader" Version="0.7.0" />
     <PackageReference Include="Lib.Harmony" Version="2.3.6" PrivateAssets="all" />

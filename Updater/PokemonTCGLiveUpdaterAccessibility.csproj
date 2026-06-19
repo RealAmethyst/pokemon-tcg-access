@@ -1,0 +1,103 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Accessibility mod for the STANDALONE Updater app (Updater.exe), which is a separate Unity
+    process from the main game and has no mod loaded by default — that's why it's silent. See the
+    memory note `project-updater-separate-process`. This builds a second MelonLoader mod that loads
+    into Updater.exe specifically ([MelonGame("pokemon","Updater")], matching its app.info).
+
+    It reuses the main mod's hard parts (Prism speech, WindowFix, KeyboardNavigator) by linking the
+    shared source files; the only main-mod dependency those drag in is Util.UiLabels, stubbed here.
+
+    Inherits $(GameDir) from ..\Directory.Build.props. The Updater lives in a version-stamped folder
+    (Updater\<appPatcherVersion>\); override UpdaterVersion if it bumps:
+      dotnet build -c Release Updater\PokemonTCGLiveUpdaterAccessibility.csproj /p:UpdaterVersion=1.6.0
+  -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>PokemonTCGLiveUpdaterAccessibility</AssemblyName>
+    <RootNamespace>PokemonTCGLiveAccessibility</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DebugType>portable</DebugType>
+
+    <UpdaterVersion Condition="'$(UpdaterVersion)' == ''">1.5.0</UpdaterVersion>
+    <UpdaterManagedDir>$(GameDir)\Updater\$(UpdaterVersion)\Updater_Data\Managed</UpdaterManagedDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LavaGang.MelonLoader" Version="0.7.0" />
+    <PackageReference Include="Lib.Harmony" Version="2.3.6" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Our own files (this folder) -->
+  <ItemGroup>
+    <Compile Include="UpdaterMain.cs" />
+    <Compile Include="UpdaterScreen.cs" />
+    <Compile Include="UiLabels.cs" />
+  </ItemGroup>
+
+  <!-- Shared source linked from the main mod. KeyboardNavigator pulls in INavSection + (stubbed)
+       Util.UiLabels; SpeechEngine pulls in Prism/TextProcessor/Announce/Log; WindowFix pulls in Log. -->
+  <ItemGroup>
+    <Compile Include="..\Speech\Prism.cs"            Link="Shared\Prism.cs" />
+    <Compile Include="..\Speech\SpeechEngine.cs"     Link="Shared\SpeechEngine.cs" />
+    <Compile Include="..\Speech\TextProcessor.cs"    Link="Shared\TextProcessor.cs" />
+    <Compile Include="..\Speech\Announce.cs"         Link="Shared\Announce.cs" />
+    <Compile Include="..\Util\Log.cs"                Link="Shared\Log.cs" />
+    <Compile Include="..\Util\WindowFix.cs"          Link="Shared\WindowFix.cs" />
+    <Compile Include="..\Navigation\KeyboardNavigator.cs" Link="Shared\KeyboardNavigator.cs" />
+    <Compile Include="..\Navigation\INavSection.cs"  Link="Shared\INavSection.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Unity engine modules (from the Updater's own Managed dir) -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(UpdaterManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(UpdaterManagedDir)\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- The Updater's own gameplay assembly (TPCI.Updater / TPCI.Updater.Components) -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(UpdaterManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
