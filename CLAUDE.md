@@ -133,6 +133,17 @@ Copy-Item ..\research\prism-source\build\Release\prism.dll `
   "C:\PokemonTCGLive\prism.dll" -Force
 ```
 
+### Updater mod (the standalone `Updater.exe`)
+The updater is a **separate Unity process** with its own MelonLoader install — `Updater\<appPatcherVersion>\` (currently `1.5.0`). Project: `Updater\PokemonTCGLiveUpdaterAccessibility.csproj` (own `[MelonGame("pokemon","Updater")]`, reuses shared source via `<Compile Include="..\...">`). See memory `project-updater-separate-process`.
+```powershell
+# Build (override UpdaterVersion if the folder bumps):
+dotnet build -c Release Updater\PokemonTCGLiveUpdaterAccessibility.csproj
+# Deploy:
+Copy-Item Updater\bin\Release\PokemonTCGLiveUpdaterAccessibility.dll `
+  "C:\PokemonTCGLive\Updater\1.5.0\Mods\PokemonTCGLiveUpdaterAccessibility.dll" -Force
+```
+MelonLoader was installed into the updater folder by copying `version.dll` + `MelonLoader\` + `UserData\Loader.cfg` (hide_console=true) from the game folder, plus `prism.dll` next to `Updater.exe`. To **revert** (if a future update misbehaves), rename `Updater\<ver>\version.dll`. Safe smoke test without a real update: `Updater.exe --manifestUrl --installPath` (empty args → Boot aborts after the mod loads & speaks).
+
 ---
 
 ## Critical Gotchas (don't trip on these again)
@@ -170,6 +181,8 @@ All decompilation done with `ilspycmd` (in `C:\Users\Amethyst\.dotnet\tools\ilsp
 ## Workflow Conventions (durable preferences)
 
 - **No workarounds. Use the game's own systems.** The decompiled code in `../research/decompiled/` is the definitive source of truth — every screen, button, focus model, and input path is already in there. Before writing any nav/focus/input logic, find what the game uses natively (uGUI `Selectable.navigation`, `EventSystem.SetSelectedGameObject`, `StandaloneInputModule`, `FocusedElement`, button `OnClick` UnityEvents, etc.) and hook *those*. Don't synthesize parallel systems just because the first guess didn't work — re-read the decompiled code until you find the right hook. Synthetic fallbacks (HoverableScanner-style) are only a last resort for screens where the game truly has nothing.
+- **Remove old code — don't keep it.** When a feature is rewritten or a game update obsoletes a path, **delete** the dead code outright. No commented-out blocks, no `_old`/`_v2` duplicates, no "keep just in case." Git history is the safety net; the working tree always reflects the *current* game only.
+- **The game updates constantly — re-decompile routinely.** `../research/decompiled/` goes stale with every game patch (it's local-only, not in git). After any update, re-run `../research/decompile.sh` (defaults to the `C:\PokemonTCGLive` junction and re-decompiles **fresh** — it no longer skips existing output) before trusting any file:line reference, then rebuild against the new DLLs and fix whatever the update renamed/removed. A clean `dotnet build` against the live DLLs is the post-update smoke test.
 - **Designer / coder split.** Amethyst designs, Claude codes. Open design questions go in `mod/QUESTIONS.md` (then move to `../research/` once answered).
 - **Mod folder is the git repo.** `mod/` only contains code. `research/` is local-only (not in git), holds decompiled source, notes, archived questions, the Prism clone, build scripts.
 - **Speech format default:** `"<item name>[, <description>], <index> of <total>"` — single speech call per item. Shops/options screens are exceptions because they involve prices/values. Cards are their own domain (deferred to Phase 3).
