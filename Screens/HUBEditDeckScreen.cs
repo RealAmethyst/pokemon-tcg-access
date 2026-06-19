@@ -151,6 +151,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             harmony.Patch(deactivate, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBEditDeckScreen), nameof(Deactivate_Postfix))));
 
         AddCardOverlayScreen.Install(harmony, router);
+        // 1.5.0 deck-editor overlays (open over the editor; silent without their own handlers).
+        DeckStatsOverlayScreen.Install(harmony, router);
+        CraftAllConfirmOverlayScreen.Install(harmony, router);
+        DeckValidityOverlayScreen.Install(harmony, router);
         Log.Info("HUBEditDeckScreen installed");
     }
 
