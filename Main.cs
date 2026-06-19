@@ -37,6 +37,7 @@ public class Mod : MelonMod
         _router = new ScreenRouter(_speech);
 
         CurrencyReader.Install(_speech);
+        PlayerNameReader.Install(_speech, _router);
 
         LocalizationHook.Install(HarmonyInstance, _speech);
         BattleLogHook.Install(HarmonyInstance, _speech);
@@ -51,6 +52,11 @@ public class Mod : MelonMod
         ProfessorTooltipScreen.Install(HarmonyInstance, _router);
         DialogueScreen.Install(HarmonyInstance, _router);
         HUBProfileScreen.Install(HarmonyInstance, _router);
+        FriendsPanelScreen.Install(HarmonyInstance, _router);
+        AddFriendOverlayScreen.Install(HarmonyInstance, _router);
+        FriendOptionsOverlayScreen.Install(HarmonyInstance, _router);
+        SendJoinMatchOverlayScreen.Install(HarmonyInstance, _router);
+        ConfirmOverlayScreen.Install(HarmonyInstance, _router);
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);
         HUBExpansionChallengeScreen.Install(HarmonyInstance, _router);
@@ -83,9 +89,15 @@ public class Mod : MelonMod
         HandleFocusTransition();
         // Handlers that activate via async / coroutine-driven game state poll here each frame.
         ConsentScreen.Poll();
+        // Friends slide-out has no clean open/close callback in landscape — detect it by geometry.
+        FriendsPanelScreen.Poll();
+        // Add-friend search isn't opened via OverlayManager (no OnActivate) — driven by its events.
+        AddFriendOverlayScreen.Poll();
         _router?.Tick();
         // Global "read my balances" key (P) — acts only on screens showing the HUB currency bar.
         CurrencyReader.Tick();
+        // "Read + copy my screen name" key (N) — scoped to the Profile + friends screens.
+        PlayerNameReader.Tick();
         // Global FTUE-focus fallback: surfaces the tutorial's highlighted element on screens we
         // don't handle yet. No-ops whenever a screen handler is active (checks _router.Active).
         FtueFocusFallback.Tick();

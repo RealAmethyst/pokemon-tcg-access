@@ -129,6 +129,10 @@
       <HintPath>$(GameManagedDir)\SharedLogicUtils.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="ClientNetworking">
+      <HintPath>$(GameManagedDir)\ClientNetworking.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="EnhancedScrollerV2">
       <HintPath>$(GameManagedDir)\EnhancedScrollerV2.dll</HintPath>
       <Private>false</Private>

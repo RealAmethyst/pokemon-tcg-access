@@ -194,7 +194,14 @@ All decompilation done with `ilspycmd` (in `C:\Users\Amethyst\.dotnet\tools\ilsp
 
 ## What to do next
 
-**Phase 1 — front-of-house. Avatar customization complete (2026-05-29). Next: remaining HUB screens.**
+**Phase 1 — front-of-house. Avatar customization complete (2026-05-29). Friends system built (2026-06-19). Next: remaining HUB screens.**
+
+**Friends system (2026-06-19):** full build — `FriendsPanelScreen` (the Profile slide-out) +
+`AddFriendOverlayScreen` / `FriendOptionsOverlayScreen` / `SendJoinMatchOverlayScreen` /
+`ConfirmOverlayScreen`. The panel has no clean C# open hook in landscape → detected by geometry
+(`FriendsPanelScreen.Poll()` in `Main.OnUpdate`). Friend list navigates `cachedFriends` data, not
+the virtualized scroller. Pending in-game verification (needs a friend for the list/challenge
+flows). See `../research/friends-system.md` and memory `project_friends_system`.
 
 The outer Profile screen and every inner avatar customization category panel are now functional. Both use the section-stack nav model (see `memory/feedback_section_escape_nav.md`):
 - Outer Profile: top tab strip ↕ Friends ↕ avatar grid ↕ catch-all (Customize/Stats/SwapAvatar)

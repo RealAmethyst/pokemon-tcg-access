@@ -407,6 +407,13 @@ internal sealed class KeyboardNavigator : INavSection
 
         if (_items.Count == 0) return;
 
+        // Keep a focused text field actually in editing mode. A field that appeared this frame (an
+        // overlay that just opened / is still fading in) can swallow the initial ActivateInputField,
+        // leaving it highlighted but INERT — typed keys don't reach it, so nothing enters and the
+        // echo never fires. Re-activating until it reports isFocused self-heals that race (and a
+        // focus we lost to a stray click) for every text field, not just one screen.
+        EnsureCurrentFieldActivated();
+
         // While the focus is in a text field, arrows / Enter / Space belong to the FIELD (caret
         // movement, a typed space, submit) — never nav, or you'd be ejected from the field before
         // you could type. Tab still moves (so AllowTab groups exit the field); Escape / Backspace
@@ -570,6 +577,25 @@ internal sealed class KeyboardNavigator : INavSection
     {
         if (s is TMPro.TMP_InputField tmp) tmp.ActivateInputField();
         else if (s is InputField legacy) legacy.ActivateInputField();
+    }
+
+    // If the current item is a text field that isn't actually in editing mode, (re)activate it. This
+    // is idempotent once the field reports isFocused, so it costs nothing in the steady state — it
+    // only fires on the frames between "we selected the field" and "the field finally captured input"
+    // (the activation race on a just-opened / still-animating overlay). A non-interactable field is
+    // left alone (its CanvasGroup may still be fading in; we retry next frame once it's interactable).
+    private void EnsureCurrentFieldActivated()
+    {
+        var sel = Current;
+        if (sel == null || !sel.IsInteractable()) return;   // IsInteractable() also honours CanvasGroup fade-in
+        if (sel is TMPro.TMP_InputField tmp)
+        {
+            if (!tmp.isFocused) { tmp.Select(); tmp.ActivateInputField(); }
+        }
+        else if (sel is InputField legacy)
+        {
+            if (!legacy.isFocused) { legacy.Select(); legacy.ActivateInputField(); }
+        }
     }
 
     // Speak each character as it's typed into the focused field (Unity input fields get no OS-level
