@@ -57,6 +57,7 @@ public class Mod : MelonMod
         BundlesOverlayScreen.Install(HarmonyInstance, _router);
         HUBDeckSelectScreen.Install(HarmonyInstance, _router);
         HUBEditDeckScreen.Install(HarmonyInstance, _router);
+        LandscapeDeckOptionsScreen.Install(HarmonyInstance, _router);
         ItemGrantScreen.Install(HarmonyInstance, _router);
         ErrorOverlayScreen.Install(HarmonyInstance, _router);
         RewardOverlayScreen.Install(HarmonyInstance, _router);
