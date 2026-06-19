@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using CardDatabase.DataAccess;
 using MatchLogic;
+using PokemonTCGLiveAccessibility.Util;
 using RainierClientSDK;
 using TPCI.Rainier.Match.Cards;
 
@@ -159,12 +160,25 @@ internal static class BattleBoardReader
             string resist = info.resistanceTyping.Count > 0 ? string.Join(", ", info.resistanceTyping.Select(t => t.ToString())) + $" minus {info.resistanceAmount}" : "none";
             lines.Add($"Type {types}. Weakness {weak}. Resistance {resist}. Retreat cost {info.retreatCost}");
 
-            int energy = info.attachedEnergy?.Count ?? 0;
-            int tools = info.attachedTools?.Count ?? 0;
-            string attach = energy == 0 ? "No energy attached" : $"{energy} energy attached";
-            if (tools > 0) attach += $", {tools} tool" + (tools > 1 ? "s" : "");
-            lines.Add(attach);
+            // Attached energy + tools BY NAME (what a sighted player reads off the symbols on the
+            // card), not just a tally: "Energy: 2 Fire Energy, 1 Double Turbo Energy", "Tools: Air
+            // Balloon". Attached cards on any in-play Pokémon are public, so this is no-cheat-safe.
+            var energyList = NamesWithCounts(info.attachedEnergy);
+            lines.Add(string.IsNullOrEmpty(energyList) ? "No energy attached" : "Energy: " + energyList);
+            var toolList = NamesWithCounts(info.attachedTools);
+            if (!string.IsNullOrEmpty(toolList)) lines.Add("Tools: " + toolList);
+
+            // Special conditions / buffs / debuffs currently on the Pokémon (poisoned, asleep, …).
+            var status = StatusEffects(info);
+            if (!string.IsNullOrEmpty(status)) lines.Add("Status: " + status);
+
+            // The Pokémon it's evolved from — the cards stacked underneath it.
+            var underneath = NamesWithCounts(info.attachedPokemon);
+            if (!string.IsNullOrEmpty(underneath)) lines.Add("Evolved from " + underneath);
         }
+        // The special-rule box (ex / Mega ex extra-prize rule, ACE SPEC deck limit), read off the card.
+        if (row != null) lines.AddRange(CardText.SpecialRuleLines(row));
+
         // Every attack / ability / trainer-effect, localized — name, cost, damage, then rules text.
         // The card type is announced with the NAME (CardNameWithType); the printed flavor/metadata
         // "notes" (archetypeID, regulation mark, release date, etc.) are skipped as noise.
@@ -185,6 +199,70 @@ internal static class BattleBoardReader
             }
         }
         return lines;
+    }
+
+    // Resolve a list of attached CardEntities to "2 Fire Energy, 1 Water Energy" — grouped by
+    // localized name, in attachment order. Empty when the list is empty / null.
+    private static string NamesWithCounts(List<CardEntity>? items)
+    {
+        if (items == null || items.Count == 0) return "";
+        var counts = new Dictionary<string, int>();
+        var order = new List<string>();
+        foreach (var e in items)
+        {
+            if (e == null) continue;
+            var nm = EntityName(e.entityID);
+            if (string.IsNullOrEmpty(nm)) nm = "card";
+            if (!counts.ContainsKey(nm)) { counts[nm] = 0; order.Add(nm); }
+            counts[nm]++;
+        }
+        return string.Join(", ", order.Select(nm => counts[nm] > 1 ? $"{counts[nm]} {nm}" : nm));
+    }
+
+    // The localized card name for an entity id — the game's own resolver (the same one the prompts use).
+    private static string EntityName(string entityID)
+    {
+        if (string.IsNullOrEmpty(entityID)) return "";
+        try
+        {
+            var mm = MatchManager.GetInstanceFromScene();
+            if (mm != null && mm.TryGetCardNameFromEntityID(entityID, out var name, true)) return name;
+        }
+        catch { }
+        return "";
+    }
+
+    // The Pokémon's current status effects, localized (special conditions + buffs / debuffs). Each
+    // AppliedStatusEffect exposes the game's own loc id; unfilled {…} substitution slots are dropped.
+    private static string StatusEffects(CardInfo info)
+    {
+        try
+        {
+            var all = info.allStatusEffects;
+            if (all == null || all.Count == 0) return "";
+            var parts = new List<string>();
+            foreach (var se in all)
+            {
+                if (se == null) continue;
+                string? text = null;
+                try { var loc = se.GetLocId(); if (!string.IsNullOrEmpty(loc)) text = TPCI.Localization.LocalizationManager.Instance?.GetString(loc); }
+                catch { }
+                if (string.IsNullOrWhiteSpace(text) || text!.Contains("(Missing)")) text = se.actionName;
+                text = StripBraces(text);
+                if (!string.IsNullOrWhiteSpace(text)) parts.Add(text!.Trim());
+            }
+            return string.Join(", ", parts.Distinct());
+        }
+        catch { return ""; }
+    }
+
+    private static string StripBraces(string? s)
+    {
+        if (string.IsNullOrEmpty(s) || s!.IndexOf('{') < 0) return s ?? "";
+        var sb = new System.Text.StringBuilder(s!.Length);
+        bool inb = false;
+        foreach (var ch in s!) { if (ch == '{') inb = true; else if (ch == '}') inb = false; else if (!inb) sb.Append(ch); }
+        return sb.ToString();
     }
 
     // Cost / damage / rules-text for the action with this (localized) name on the card — so the

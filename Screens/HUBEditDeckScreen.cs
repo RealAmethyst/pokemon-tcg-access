@@ -118,6 +118,14 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private bool _ftueFocusActive;
     private Selectable? _ftueFocusShown;
 
+    // The sort / filter popups (AnimatedSetActive on the controller). When one is open we run a modal
+    // sort mode: focus into its toggles, Tab is inert, Escape closes it.
+    private AnimatedSetActive? _sortAnim;
+    private AnimatedSetActive? _filterAnim;
+    private KeyboardNavigator? _sortNav;
+    private AnimatedSetActive? _sortPopup;   // the popup the modal mode is currently driving
+    private bool _sortMode;
+
     // The tutorial arms a drop target with an ftueDrop callback (Unfocus + SaveInventory +
     // indicator.Unblock) that OnDrop fires after AddCard/RemoveCard to advance the FTUE. We call
     // AddCard/RemoveCard directly (robust, no synthesized drag), so we fire that same callback.
@@ -282,6 +290,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         // A forced non-card tutorial focus (category tab, Back, …): drive just that control.
         if (_ftueFocusActive) { _ftueFocusNav?.Tick(); return; }
 
+        // The sort / filter popup is its OWN modal: while it's open, drive only its options. Tab and
+        // the section nav are inert (we return), Escape closes it.
+        if (TickSortMode()) return;
+
         // Tab cycles sections (and, while holding, moves to the placement group).
         if (UnityEngine.Input.GetKeyDown(KeyCode.Tab))
         {
@@ -332,6 +344,8 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
         // Top bar: header/options/back buttons — every Button that ISN'T a card stub's button or a
         // category toggle. (Card stub buttons live under CardStubParts; we drive those by data.)
+        _sortAnim ??= ReflectAnim(_controller, "landscapeSortingOverlay");
+        _filterAnim ??= ReflectAnim(_controller, "landscapeFilterOverlay");
         var topButtons = _controller.GetComponentsInChildren<Button>(includeInactive: false)
             .Where(b => b.isActiveAndEnabled)
             .Where(b => b.GetComponentInParent<CardStubParts>() == null)
@@ -536,16 +550,34 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         _router.Speech.Say(Speech.Announce.Item(CardLabel(stack), description: null, index: idx + 1, total: total), interrupt);
     }
 
-    // "Charizard ex, Stage 2 Pokémon, 2 in deck" — name+type from the printed card, plus the
-    // in-deck count (what a sighted player reads off the count badge).
+    // "Charizard ex, Stage 2 Pokémon, 1 in deck, 4 owned" — name+type from the printed card, plus the
+    // counts a sighted player reads off the badges: how many are in the deck and how many you OWN
+    // (TotalOwnedQuantity counts every printing of the card). A card you don't own at all reads "not
+    // owned"; a deck that uses more copies than you own (legal to build, but you can't play it ranked)
+    // reads "you don't own enough" — the missing flag the player couldn't see.
     private string CardLabel(ArchetypeDBCards stack)
     {
-        string label;
         var card = PreferredCard(stack);
         var row = card != null ? ManagerSingleton<CardDatabaseManager>.instance.TryGetCardFromDatabase(card.CardID) : null;
-        label = row != null ? CardText.NameWithType(row) : stack.LocalizedCardName();
+        var name = row != null ? CardText.NameWithType(row) : stack.LocalizedCardName();
+
         int inDeck = stack.TotalDeckQuantity();
-        return inDeck > 0 ? $"{label}, {inDeck} in deck" : label;
+        int owned = SafeOwned(stack);
+
+        var parts = new List<string> { name };
+        if (inDeck > 0) parts.Add($"{inDeck} in deck");
+        if (owned <= 0) parts.Add("not owned");
+        else
+        {
+            parts.Add($"{owned} owned");
+            if (inDeck > owned) parts.Add("you don't own enough");
+        }
+        return string.Join(", ", parts);
+    }
+
+    private static int SafeOwned(ArchetypeDBCards stack)
+    {
+        try { return stack.TotalOwnedQuantity(); } catch { return 0; }
     }
 
     private static ICardDataRow? PreferredCard(ArchetypeDBCards stack)
@@ -905,12 +937,94 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         return fallback;
     }
 
-    private static string CategoryLabel(Selectable s)
+    // The category toggle's only visible text is its COUNT badge (e.g. "13"), so reading the text gave
+    // just a number. Speak the category NAME from the filter tab's loc id, with the count as a
+    // qualifier: "Pokémon, 13 cards, selected".
+    private string CategoryLabel(Selectable s)
     {
+        var name = CategoryName(s);
         var tmp = s.GetComponentInChildren<TMPro.TMP_Text>(includeInactive: false);
-        var label = tmp != null && !string.IsNullOrWhiteSpace(tmp.text) ? tmp.text : s.gameObject.name;
+        var count = tmp != null && !string.IsNullOrWhiteSpace(tmp.text) ? tmp.text!.Trim() : null;
         var state = (s is Toggle t && t.isOn) ? "selected" : "not selected";
-        return $"{label}, {state}";
+
+        var parts = new List<string> { !string.IsNullOrWhiteSpace(name) ? name! : (count ?? s.gameObject.name) };
+        if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(count)) parts.Add($"{count} cards");
+        parts.Add(state);
+        return string.Join(", ", parts);
+    }
+
+    // The localized name of the category whose tab toggle this is (the game's filter-tab FilterName).
+    private string? CategoryName(Selectable s)
+    {
+        try
+        {
+            if (_categorySelector == null) return null;
+            foreach (var tab in _categorySelector.AllTabs)
+                if (tab?.Toggle != null && ReferenceEquals(tab.Toggle.MyToggle, s)) return LocName(tab.FilterName);
+        }
+        catch { }
+        return null;
+    }
+
+    private static string? LocName(string? id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        var v = TPCI.Localization.LocalizationManager.Instance?.GetString(id);
+        if (string.IsNullOrWhiteSpace(v) || v!.Contains("(Missing)")) return null;
+        return v.Trim();
+    }
+
+    // ── Sort / filter popup (modal) ───────────────────────────────────────────────────────────
+
+    // Drive the modal sort/filter mode while a popup is open; returns true to consume the frame so the
+    // section nav and Tab stay inert. Escape closes the popup via its own Hide().
+    private bool TickSortMode()
+    {
+        var popup = ActiveSortPopup();
+        if (popup == null)
+        {
+            if (_sortMode) { _sortMode = false; _sortPopup = null; ReAnnounceCurrent(interrupt: true); }
+            return false;
+        }
+        if (!_sortMode || !ReferenceEquals(_sortPopup, popup)) EnterSortMode(popup);
+
+        if (UnityEngine.Input.GetKeyDown(KeyCode.Escape)
+            || (UnityEngine.Input.GetKeyDown(KeyCode.Backspace) && !IsTextInputFocused()))
+        {
+            try { popup.Hide(); } catch { }   // ExitSortMode runs next tick once the popup is gone
+            return true;
+        }
+        _sortNav?.Tick();
+        return true;
+    }
+
+    // The open sort or filter popup (mutually exclusive), or null when both are closed.
+    private AnimatedSetActive? ActiveSortPopup()
+    {
+        if (_sortAnim != null && _sortAnim.gameObject.activeInHierarchy) return _sortAnim;
+        if (_filterAnim != null && _filterAnim.gameObject.activeInHierarchy) return _filterAnim;
+        return null;
+    }
+
+    private void EnterSortMode(AnimatedSetActive popup)
+    {
+        _sortMode = true;
+        _sortPopup = popup;
+        _sortNav ??= new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Sort" };
+        var items = popup.GetComponentsInChildren<Selectable>(includeInactive: false)
+            .Where(s => (s is Toggle || s is Button) && s.isActiveAndEnabled && s.IsInteractable())
+            .OrderBy(s => ReadingOrder(s.transform))
+            .ToList();
+        _sortNav.SetItems(items);
+        Say(ReferenceEquals(popup, _filterAnim) ? "Filter" : "Sort by", interrupt: true);
+        _sortNav.FocusFirst(announce: true, interruptPrior: false);
+    }
+
+    private static AnimatedSetActive? ReflectAnim(object? instance, string name)
+    {
+        if (instance == null) return null;
+        try { return AccessTools.Field(instance.GetType(), name)?.GetValue(instance) as AnimatedSetActive; }
+        catch { return null; }
     }
 
     private void SubscribeToFtue()

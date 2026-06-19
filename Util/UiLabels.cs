@@ -33,14 +33,15 @@ internal static class UiLabels
     // selected/not-selected for their toggles; this gives the top strip parity.
     public static string TopNavLabel(Selectable s)
     {
-        var label = Navigation.KeyboardNavigator.DefaultLabel(s);
         try
         {
             var grp = s.GetComponentInParent<PersistentNavButtonGroup>();
-            if (grp != null && grp.IsOn()) return $"{label}, selected";
+            // The current tab's button is disabled by the game so it can't be re-pressed — that's
+            // "selected", not "unavailable", so build from the base name rather than DefaultLabel.
+            if (grp != null && grp.IsOn()) return $"{Navigation.KeyboardNavigator.ResolveBaseLabel(s)}, selected";
         }
         catch { }
-        return label;
+        return Navigation.KeyboardNavigator.DefaultLabel(s);
     }
 
     // Rich label for composite widgets. Returns null when not applicable (caller falls back to

@@ -1,8 +1,11 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using HarmonyLib;
 using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
+using SharedLogicUtils.source.DataTypes;
+using TPCI.Localization;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -98,7 +101,7 @@ internal sealed class RewardOverlayScreen : IScreenHandler
     {
         if (_controller == null) return;
         var items = CollectButtons();
-        _nav.SetItems(items);
+        _nav.SetItems(items, RewardButtonLabel);
         _nav.AllowHorizontal = true;   // reward buttons sit in a row
         if (!announce) return;
 
@@ -112,19 +115,58 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         else _router.Speech.Say(Name, interrupt: string.IsNullOrWhiteSpace(title));
     }
 
+    // "<header>, <rewards>, <status>". The header + status come from the active custom view when it's
+    // a single-tier reward detail (its tierTxt "TIER 1" + bottom message "already collected"); other
+    // reward overlays (generic COLLECT, league, level-up, …) fall back to the generic overlay's title.
+    // The rewards themselves are read here by name instead of being navigated as bare "x1" slots.
     private string? OverlayTitle()
     {
-        if (_controller?.activeOverlay is not ContentItemRewardOverlay ov) return null;
         var parts = new List<string>();
-        var title = TmpText(ov.titleTxt);
-        if (!string.IsNullOrWhiteSpace(title)) parts.Add(title!);
-        var count = TmpText(ov.contentCountTxt);
-        if (!string.IsNullOrWhiteSpace(count)) parts.Add(count!);
+        var tier = _controller?.activeCustomView as SingleTierCustomView;
+        if (tier != null)
+        {
+            var t = TmpText(tier.tierTxt);
+            if (!string.IsNullOrWhiteSpace(t)) parts.Add(NumericToTier(t!));
+        }
+        else if (_controller?.activeOverlay is ContentItemRewardOverlay genericOv)
+        {
+            var title = TmpText(genericOv.titleTxt);
+            if (!string.IsNullOrWhiteSpace(title)) parts.Add(title!);
+            var count = TmpText(genericOv.contentCountTxt);
+            if (!string.IsNullOrWhiteSpace(count)) parts.Add(count!);
+        }
+
+        var rewards = RewardsSummary();
+        if (!string.IsNullOrWhiteSpace(rewards)) parts.Add(rewards!);
+
+        if (tier != null)
+        {
+            var msg = TmpText(tier.bottomMessageTxt);
+            if (!string.IsNullOrWhiteSpace(msg)) parts.Add(msg!);
+        }
         return parts.Count > 0 ? string.Join(", ", parts) : null;
     }
 
-    // All active buttons in the overlay + its controller (default COLLECT button lives on the
-    // controller; close / reward slots live on the overlay). Ordered top-to-bottom, left-to-right.
+    // The reward items, read by name (card / booster / currency) from the spawned reward slots, so
+    // the contents are spoken in the announcement rather than focused as bare "x1" count buttons.
+    private string? RewardsSummary()
+    {
+        if (_controller?.activeOverlay is not ContentItemRewardOverlay ov || ov.rewardHolder == null) return null;
+        var parts = new List<string>();
+        foreach (var slot in ov.rewardHolder.GetComponentsInChildren<ProductItemSummarySlot>(includeInactive: false))
+        {
+            var item = ReadFieldObj(slot, "currentItem") is ItemData d ? d : default;
+            if (item.itemType == ItemData.ItemType.None) continue;
+            int n = ReadFieldObj(slot, "numberOfItems") is int i && i > 0 ? i : (item.amount > 0 ? item.amount : 1);
+            var name = ItemName(item);
+            if (!string.IsNullOrWhiteSpace(name)) parts.Add(n > 1 ? $"{name} times {n}" : name);
+        }
+        return parts.Count > 0 ? string.Join(", ", parts) : null;
+    }
+
+    // The overlay's actionable buttons (COLLECT REWARDS / UNLOCK, DROP RATES, close). The reward
+    // slots themselves are excluded — their contents are spoken via RewardsSummary instead of being
+    // navigated as bare "x1" buttons. Ordered top-to-bottom, left-to-right.
     private List<Selectable> CollectButtons()
     {
         var result = new List<Selectable>();
@@ -134,11 +176,76 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         {
             if (root == null) return;
             foreach (var b in root.GetComponentsInChildren<Button>(includeInactive: false))
-                if (b.isActiveAndEnabled && seen.Add(b)) result.Add(b);
+                if (b.isActiveAndEnabled && b.GetComponentInParent<ProductItemSummarySlot>() == null && seen.Add(b))
+                    result.Add(b);
         }
         Sweep(_controller.gameObject);
         if (_controller.activeOverlay != null) Sweep(_controller.activeOverlay.gameObject);
         return result.OrderBy(s => ReadingOrder(s.transform)).ToList();
+    }
+
+    // Worded buttons (DROP RATES, COLLECT REWARDS, UNLOCK) keep their text; the icon-only "X" reads
+    // "Close".
+    private static string RewardButtonLabel(Selectable s)
+    {
+        foreach (var t in s.GetComponentsInChildren<TMPro.TMP_Text>(includeInactive: false))
+            if (!string.IsNullOrEmpty(t.text) && t.text.Any(char.IsLetter)) return KeyboardNavigator.DefaultLabel(s);
+        return "Close";
+    }
+
+    private static string NumericToTier(string s)
+        => s.Any(char.IsLetter) ? s : $"Tier {s}";
+
+    private static string ItemName(ItemData item)
+    {
+        if (item.itemType == ItemData.ItemType.Card && !string.IsNullOrEmpty(item.clientId))
+        {
+            try
+            {
+                var row = ManagerSingleton<CardDatabaseManager>.instance?.TryGetCardFromDatabase(item.clientId);
+                if (row != null) return CardText.NameWithType(row);
+            }
+            catch { }
+        }
+        switch (item.itemType)
+        {
+            case ItemData.ItemType.HardCurrency: return ShopLabels.CurrencyWord(CurrencyType.HardCurrency);
+            case ItemData.ItemType.TraderCurrency: return ShopLabels.CurrencyWord(CurrencyType.TradeCurrency);
+            case ItemData.ItemType.TokenCurrency: return ShopLabels.CurrencyWord(CurrencyType.TokenCurrency);
+            case ItemData.ItemType.SoftCurrency: return ShopLabels.CurrencyWord(CurrencyType.SoftCurrency);
+        }
+        var loc = Loc(item.contentLocId);
+        if (loc != null) return loc;
+        return item.itemType switch
+        {
+            ItemData.ItemType.Booster => "booster pack",
+            ItemData.ItemType.Coin => "coin",
+            ItemData.ItemType.Sleeve => "card sleeve",
+            ItemData.ItemType.DeckBox => "deck box",
+            ItemData.ItemType.Deck => "deck",
+            ItemData.ItemType.Avatar => "avatar item",
+            _ => "item",
+        };
+    }
+
+    private static string? Loc(string? id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        var s = LocalizationManager.Instance?.GetString(id);
+        if (string.IsNullOrWhiteSpace(s) || s!.Contains("(Missing)")) return null;
+        return s.Trim();
+    }
+
+    private static object? ReadFieldObj(object? instance, string name)
+    {
+        if (instance == null) return null;
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        for (var t = instance.GetType(); t != null; t = t.BaseType)
+        {
+            var field = t.GetField(name, flags);
+            if (field != null) return field.GetValue(instance);
+        }
+        return null;
     }
 
     private static string? TmpText(Component? c)

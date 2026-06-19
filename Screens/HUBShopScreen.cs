@@ -45,6 +45,14 @@ internal sealed class HUBShopScreen : IScreenHandler
     private string _structureAtPause = string.Empty;
     private int _indexAtPause = -1;
     private string _lastContentSig = string.Empty;
+
+    // REDEEM rewards: subscribe to the scanned-list's own update event (a clean signal, no polling) so
+    // a scanned code surfaces its reward and we focus into it like a modal.
+    private ScannedCardListView? _redeemList;
+    private UnityEngine.Events.UnityAction? _redeemListener;
+    private int _lastScannedCount;
+    private int _rewardsGroupIndex = -1;
+    private bool _redeemResultPending;   // a failed submit just fired; speak its status message next tick
     private Selectable? _lastFtueTarget;
     private bool _subscribedToFtue;
     private Coroutine? _ftueWaitCoroutine;
@@ -76,6 +84,14 @@ internal sealed class HUBShopScreen : IScreenHandler
         if (deactivate != null)
             harmony.Patch(deactivate, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBShopScreen), nameof(Deactivate_Postfix))));
 
+        // REDEEM: a failed submit (already-redeemed / invalid / empty / list-full) doesn't add to the
+        // list, so onListUpdated never fires — but the game calls PlayScanFXAnimations(DidFail) the
+        // moment it knows, in the same block that writes the status message. Hook that as the clean
+        // signal to speak the result.
+        var playFx = AccessTools.Method(typeof(ShopPageCodeCardScreen), "PlayScanFXAnimations");
+        if (playFx != null)
+            harmony.Patch(playFx, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBShopScreen), nameof(PlayScanFX_Postfix))));
+
         Log.Info("HUBShopScreen installed");
     }
 
@@ -95,8 +111,19 @@ internal sealed class HUBShopScreen : IScreenHandler
         if (_instance == null || _instance._controller != __instance) return;
         if (!_instance._active) return;
         _instance._active = false;
+        _instance.UnsubscribeRedeem();
         _instance._router.Deactivate(_instance);
         _instance._controller = null;
+    }
+
+    // The redeem scan FX fired. DidFail (the enum's value 3) means the submit was rejected — flag it so
+    // the next Tick reads + speaks the status message (set in the same synchronous block). Success is
+    // left to onListUpdated (the reward is announced as it's added).
+    private static void PlayScanFX_Postfix(object[] __args)
+    {
+        if (_instance == null || !_instance._active || __args == null || __args.Length == 0) return;
+        try { if (System.Convert.ToInt32(__args[0]) == 3) _instance._redeemResultPending = true; }
+        catch { }
     }
 
     public void OnEnter()
@@ -184,6 +211,8 @@ internal sealed class HUBShopScreen : IScreenHandler
             if (sig != _lastContentSig) { _lastContentSig = sig; OnContentChanged(); return; }
         }
 
+        if (_redeemResultPending) AnnounceRedeemResult();   // speak a failed-submit status (set last frame)
+
         if (_groups.Count == 0) return;
 
         var nav = _groups[_activeGroup];
@@ -255,6 +284,7 @@ internal sealed class HUBShopScreen : IScreenHandler
         _groups.Clear();
         _tabGroupIndex = -1;
         _firstContentGroupIndex = -1;
+        _rewardsGroupIndex = -1;
         if (_controller == null) { _lastContentSig = ContentSig(); return; }
 
         var known = new HashSet<Selectable>();
@@ -302,14 +332,25 @@ internal sealed class HUBShopScreen : IScreenHandler
         var sub = ActiveSubScreen();
         if (sub is ShopPageCodeCardScreen redeemSub)
         {
-            // REDEEM is a code-entry screen, not a product list: present a clean, ordered set of
-            // controls (the code field first so it's the landing spot and Tab reaches it directly),
-            // dropping the desktop-irrelevant camera scanner and bare icon strays.
-            var items = RedeemControls(redeemSub);
-            if (items.Count > 0)
+            // Subscribe to the scanned-list's OWN update event (the clean signal) so a scanned reward
+            // is surfaced + focused without polling its count every tick.
+            SubscribeRedeem(redeemSub);
+
+            // The code-entry controls (field first so it's the landing spot), then a SEPARATE "Rewards"
+            // group for the scanned codes waiting to be collected — so the rewards read as their own
+            // thing and we can drop focus straight onto them when one arrives (OnScannedListUpdated).
+            var controls = RedeemInputControls(redeemSub);
+            if (controls.Count > 0)
             {
-                AddGroup(items, groupName: "Redeem a code");
-                _firstContentGroupIndex = _groups.Count - 1;
+                AddGroup(controls, resolver: RedeemLabel, groupName: "Redeem a code");
+                if (_firstContentGroupIndex < 0) _firstContentGroupIndex = _groups.Count - 1;
+            }
+            var rewards = RedeemRewardControls(redeemSub);
+            if (rewards.Count > 0)
+            {
+                AddGroup(rewards, resolver: RedeemLabel, groupName: "Rewards");
+                _rewardsGroupIndex = _groups.Count - 1;
+                if (_firstContentGroupIndex < 0) _firstContentGroupIndex = _groups.Count - 1;
             }
         }
         else if (sub != null)
@@ -335,17 +376,13 @@ internal sealed class HUBShopScreen : IScreenHandler
                 if (_firstContentGroupIndex < 0) _firstContentGroupIndex = _groups.Count - 1;
             }
         }
-        else
-        {
-            // Fallback (builder not ready / unknown page): sweep all content under the controller.
-            var content = _controller.GetComponentsInChildren<Selectable>(includeInactive: false)
-                .Where(s => !known.Contains(s))
-                .Where(s => s is Button || s is Toggle || s is TMP_InputField || s is InputField)
-                .Where(s => s.isActiveAndEnabled)
-                .OrderBy(s => ReadingOrder(s.transform))
-                .ToList();
-            if (content.Count > 0) { AddGroup(content); _firstContentGroupIndex = _groups.Count - 1; }
-        }
+        // else: sub == null → the page-drag builder hasn't mounted the current sub-screen yet (it
+        // loads asynchronously). Build no content this pass — the top-nav + sub-tabs already give
+        // focus somewhere to land, and the content-signature poll rebuilds the instant the sub-screen
+        // resolves. We must NOT sweep the whole controller as a fallback: the page carousel
+        // (PageDragManager) keeps the adjacent tabs' pages mounted off-screen, so a controller-wide
+        // sweep pulls in another tab's products and info buttons — that was the EXPANSIONS content
+        // bleeding onto the REDEEM screen. Every other path here is scoped to the one resolved sub.
 
         _lastContentSig = ContentSig();
     }
@@ -384,7 +421,6 @@ internal sealed class HUBShopScreen : IScreenHandler
     {
         var sub = ActiveSubScreen();
         if (sub == null) return "none";
-        int products = sub.GetComponentsInChildren<ShopProductController>(includeInactive: false).Length;
         int page = -1;
         try
         {
@@ -392,6 +428,7 @@ internal sealed class HUBShopScreen : IScreenHandler
             if (pdm != null) page = pdm.currentPage;
         }
         catch { }
+        int products = sub.GetComponentsInChildren<ShopProductController>(includeInactive: false).Length;
         return $"{sub.GetType().Name}|{page}|{products}";
     }
 
@@ -486,7 +523,9 @@ internal sealed class HUBShopScreen : IScreenHandler
     // The REDEEM screen's meaningful controls, ordered: the code field, then SUBMIT (matched by its
     // wired onClick), then the remaining worded buttons (CLEAR, COLLECT ALL, DROP RATES). The camera
     // scanner toggle and the bare scanner-frame icons have no worded label, so they're dropped.
-    private static List<Selectable> RedeemControls(ShopPageCodeCardScreen redeem)
+    // The code-entry side: the code field (landing spot), SUBMIT, then the worded buttons (CLEAR, DROP
+    // RATES). The reward-side buttons (delete / COLLECT ALL) and the desktop camera scanner are excluded.
+    private static List<Selectable> RedeemInputControls(ShopPageCodeCardScreen redeem)
     {
         var items = new List<Selectable>();
         var field = ReadField<TMP_InputField>(redeem, "_scanResultInputField");
@@ -501,11 +540,105 @@ internal sealed class HUBShopScreen : IScreenHandler
         foreach (var b in buttons.OrderBy(b => ReadingOrder(b.transform)))
         {
             if (items.Contains(b)) continue;
+            if (HasHandler(b, "OnClickDeleteIcon") || HasHandler(b, "OnClickCollectAllButton")) continue;  // reward side
             if (HasHandler(b, "OnClickCameraToggle")) continue;        // desktop scanner toggle
             if (!HasLetterText(b) && !HasHandler(b, "OnClickClearInputField")) continue;  // icon-only stray
             items.Add(b);
         }
         return items;
+    }
+
+    // The REWARDS list: each scanned entry's delete button (read by gift name via RedeemLabel), then
+    // COLLECT ALL. Empty until a code is scanned.
+    private static List<Selectable> RedeemRewardControls(ShopPageCodeCardScreen redeem)
+    {
+        var items = new List<Selectable>();
+        var buttons = redeem.GetComponentsInChildren<Button>(includeInactive: false)
+            .Where(b => b.isActiveAndEnabled).ToList();
+        foreach (var b in buttons.OrderBy(b => ReadingOrder(b.transform)))
+            if (HasHandler(b, "OnClickDeleteIcon")) items.Add(b);
+        var collect = buttons.FirstOrDefault(b => HasHandler(b, "OnClickCollectAllButton"));
+        if (collect != null) items.Add(collect);
+        return items;
+    }
+
+    // A scanned-reward entry's delete button reads "<gift name>, remove"; everything else keeps its
+    // default label (code field, SUBMIT, COLLECT ALL, DROP RATES).
+    private static string RedeemLabel(Selectable s)
+    {
+        var item = s.GetComponentInParent<ScannedCardListViewItem>();
+        if (item != null)
+        {
+            var name = SafeGiftName(item);
+            return string.IsNullOrWhiteSpace(name) ? "Scanned code, remove" : $"{name}, remove";
+        }
+        return KeyboardNavigator.DefaultLabel(s);
+    }
+
+    private static string? SafeGiftName(ScannedCardListViewItem item)
+    {
+        // Read the gift name straight off the entry's displayed header LocText (avoids referencing the
+        // CouponStatusData data type, which lives in an assembly the mod doesn't link).
+        try { var lt = ReadField<LocText>(item, "_rewardHeaderTextView"); var t = lt != null ? lt.CurrentText : null; return string.IsNullOrWhiteSpace(t) ? null : t!.Trim(); }
+        catch { return null; }
+    }
+
+    // ---- REDEEM rewards: clean event subscription (no polling) -----------------------------
+
+    private void SubscribeRedeem(ShopPageCodeCardScreen redeem)
+    {
+        var list = ReadField<ScannedCardListView>(redeem, "_scannedCardListView");
+        if (list == null || ReferenceEquals(list, _redeemList)) return;   // already on this list
+        UnsubscribeRedeem();
+        _redeemList = list;
+        _redeemListener = OnScannedListUpdated;
+        try { list.onListUpdated.AddListener(_redeemListener); } catch { }
+        _lastScannedCount = list.count;
+    }
+
+    private void UnsubscribeRedeem()
+    {
+        if (_redeemList != null && _redeemListener != null)
+            try { _redeemList.onListUpdated.RemoveListener(_redeemListener); } catch { }
+        _redeemList = null;
+        _redeemListener = null;
+    }
+
+    // A code was scanned (or a reward removed) — the scanned list's OWN signal. Rebuild so the new
+    // REWARDS entry + COLLECT ALL appear, and on an ADD drop focus straight onto the Rewards group so
+    // the reward is announced (modal-like — the player lands on what just arrived).
+    private void OnScannedListUpdated()
+    {
+        if (!_active || _controller == null) return;
+        if (ActiveSubScreen() is not ShopPageCodeCardScreen) return;
+        int now = _redeemList != null ? _redeemList.count : 0;
+        bool added = now > _lastScannedCount;
+        _lastScannedCount = now;
+
+        RebuildGroups();
+        if (_groups.Count == 0) { _activeGroup = -1; return; }
+        if (added && _rewardsGroupIndex >= 0 && _rewardsGroupIndex < _groups.Count)
+        {
+            _activeGroup = _rewardsGroupIndex;
+            _router.Speech.Say("Reward added", interrupt: true);
+            _groups[_activeGroup].FocusFirst(announce: true, interruptPrior: false);
+            return;
+        }
+        if (_activeGroup < 0 || _activeGroup >= _groups.Count) _activeGroup = PickDefaultGroup();
+        _groups[_activeGroup].RefocusCurrent(announce: false);
+    }
+
+    // Speak the redeem status message after a failed submit (e.g. "You have already redeemed that
+    // code." / "Invalid code."). Fired one tick after PlayScanFXAnimations(DidFail) so the game has
+    // written the message; reads the localized text straight off the screen's status LocText.
+    private void AnnounceRedeemResult()
+    {
+        _redeemResultPending = false;
+        if (ActiveSubScreen() is not ShopPageCodeCardScreen redeem) return;
+        string? status = null;
+        try { var lt = ReadField<LocText>(redeem, "_codeStatusMessage"); var t = lt != null ? lt.CurrentText : null; status = string.IsNullOrWhiteSpace(t) ? null : t!.Trim(); }
+        catch { }
+        if (!string.IsNullOrWhiteSpace(status)) _router.Speech.Say(status!, interrupt: true);
     }
 
     private static bool HasHandler(Button b, string method)
@@ -577,8 +710,11 @@ internal sealed class HUBShopScreen : IScreenHandler
             var tmp = s.GetComponentInChildren<TMP_Text>(includeInactive: false);
             label = tmp != null && !string.IsNullOrEmpty(tmp.text) ? tmp.text : s.gameObject.name;
         }
-        var state = (s is Toggle t && t.isOn) ? "selected" : "not selected";
-        return s.interactable ? $"{label}, {state}" : $"{label}, {state}, unavailable";
+        bool selected = s is Toggle t && t.isOn;
+        var state = selected ? "selected" : "not selected";
+        // A selected tab is disabled by the game so it can't be re-picked — that's "selected", not
+        // "unavailable"; only a non-selected, disabled tab is genuinely unavailable.
+        return (s.interactable || selected) ? $"{label}, {state}" : $"{label}, {state}, unavailable";
     }
 
     // ---- FTUE coordination (ported from HUBHomeScreen) -------------------------------------

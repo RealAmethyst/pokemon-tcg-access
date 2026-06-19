@@ -36,6 +36,8 @@ internal static class CardText
             lines.Add($"Type {types}. Weakness {weak}. Resistance {resist}. Retreat cost {row.RetreatCost}");
         }
 
+        lines.AddRange(SpecialRuleLines(row));
+
         foreach (var a in row.GetActionInfos())
         {
             if (a == null) continue;
@@ -49,6 +51,35 @@ internal static class CardText
                 line = line.Length > 0 ? $"{line}. {a.LocalizedDescription}" : a.LocalizedDescription;
             if (line.Length > 0) lines.Add(line);
         }
+        return lines;
+    }
+
+    // The card's special-rule box — the printed rule a sighted player reads off the bottom of the card
+    // but which lives only on the card IMAGE, not in any loc table, so we supply it (game-fundamental
+    // text, like "Basic Pokémon" / "Retreat cost" already are). Detected from the card's format flags:
+    //   • ACE SPEC — the deckbuilding limit (one per deck across the whole ACE SPEC pool).
+    //   • Rule-box Pokémon (ex / EX / Mega Evolution ex / V / VSTAR / GX → 2 prizes; VMAX / Tag Team /
+    //     V-UNION → 3) — the opponent takes extra Prize cards when it's Knocked Out.
+    public static List<string> SpecialRuleLines(ICardDataRow? row)
+    {
+        var lines = new List<string>();
+        if (row == null) return lines;
+        try
+        {
+            var ff = ManagerSingleton<CardFormatManager>.instance?.FormatFlagsProvider;
+            if (ff == null) return lines;
+            var flags = row.CardFormatFlags;
+
+            if (flags.HasFlag(ff.ACESPEC))
+                lines.Add("ACE SPEC. You can have only 1 ACE SPEC card in your deck.");
+
+            int prizes = flags.HasFlag(ff.VMAX) || flags.HasFlag(ff.TagTeam) || flags.HasFlag(ff.VUNION) ? 3
+                       : flags.HasFlag(ff.ex) || flags.HasFlag(ff.EX) || flags.HasFlag(ff.MegaEvolutionEx)
+                         || flags.HasFlag(ff.V) || flags.HasFlag(ff.VSTAR) || flags.HasFlag(ff.GX) ? 2 : 1;
+            if (prizes >= 2)
+                lines.Add($"When this Pokémon is Knocked Out, your opponent takes {prizes} Prize cards.");
+        }
+        catch { }
         return lines;
     }
 

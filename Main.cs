@@ -53,6 +53,7 @@ public class Mod : MelonMod
         HUBProfileScreen.Install(HarmonyInstance, _router);
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);
+        HUBExpansionChallengeScreen.Install(HarmonyInstance, _router);
         ShopProductOverlayScreen.Install(HarmonyInstance, _router);
         BundlesOverlayScreen.Install(HarmonyInstance, _router);
         HUBDeckSelectScreen.Install(HarmonyInstance, _router);
@@ -72,6 +73,7 @@ public class Mod : MelonMod
         BattleScreen.Install(HarmonyInstance, _router);
         BattlePromptScreen.Install(HarmonyInstance, _router);
         MulliganRevealScreen.Install(HarmonyInstance, _router);
+        MatchResultScreen.Install(HarmonyInstance, _router);
         BattleSettingsScreen.Install(_router);
     }
 

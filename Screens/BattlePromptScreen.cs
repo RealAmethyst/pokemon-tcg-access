@@ -139,6 +139,18 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
         BuildPrompt(sel, handler);
 
+        // A recognized card selection that opened with NO valid options — e.g. a deck search (Nest
+        // Ball) when nothing in the deck matches, or "choose a card to discard" with an empty pile.
+        // The game still opens the overlay with a "no valid cards" notice + a Done button; speak that
+        // message and offer a Done that submits the empty selection (exactly what clicking Done does).
+        // Without this the player heard "isn't supported yet" and had no way to dismiss the overlay.
+        if (_options.Count == 0 && IsEmptyCardSelection(sel, handler))
+        {
+            var msg = NoValidCardsMessage();
+            _question = string.IsNullOrWhiteSpace(_question) ? msg : $"{_question}. {msg}";
+            _options.Add(new Option { Name = "Done", IsDone = true, Choose = () => DismissEmptySelection(handler) });
+        }
+
         if (_options.Count == 0)
         {
             // A selection family we don't drive yet. Announce the question so the player knows a
@@ -240,6 +252,34 @@ internal sealed class BattlePromptScreen : IScreenHandler
             Log.Info($"BattlePrompt: handler={handler?.GetType().Name ?? "null"} method={vs?.selectionMethod} selType={vs?.GetType().Name} groups={groups}{extra} built={_options.Count} q='{_question}'");
         }
         catch (Exception ex) { Log.Error($"BattlePrompt: diagnostics threw: {ex.Message}"); }
+    }
+
+    // ---- no valid targets ----
+
+    // A recognized card-choosing overlay that has no selectable options at all (every group's
+    // validOptions is empty) — the game opens it anyway with a "no valid cards" notice + Done.
+    private static bool IsEmptyCardSelection(PlayerSelection sel, ISelectionRequestHandler? handler)
+    {
+        if (handler is not EntitySelectionOverlay) return false;
+        if (sel.variableSelection is not EntitySelection es || es.selectionGroups == null) return false;
+        return es.selectionGroups.All(g => g?.validOptions == null || g.validOptions.Count == 0);
+    }
+
+    // The game's own "no valid cards" message. We use the plain key, not the "...press done" variant —
+    // the Done is presented as a real navigable option, not spoken as a control hint.
+    private string NoValidCardsMessage()
+    {
+        var s = LocalizationHook.Get("battle_select_no_valid_cards");
+        return string.IsNullOrWhiteSpace(s) ? "There are no valid cards to choose" : s!;
+    }
+
+    // Dismiss an empty card selection by submitting it with nothing chosen — the overlay's own
+    // SubmitClicked, the same call its Done button makes (minAmount is 0 for these, so it completes).
+    private void DismissEmptySelection(ISelectionRequestHandler? handler)
+    {
+        _submitted = true;
+        try { (handler as EntitySelectionOverlay)?.SubmitClicked(); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: dismiss empty selection threw: {ex.Message}"); }
     }
 
     // ---- PRIZE ----

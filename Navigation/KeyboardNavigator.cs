@@ -738,8 +738,14 @@ internal sealed class KeyboardNavigator : INavSection
 
         var label = ResolveBaseLabel(s);
         if (s is Toggle toggle)
+        {
             label = $"{label}, {(toggle.isOn ? "checked" : "unchecked")}";
-        if (!s.interactable)
+            // The game makes the SELECTED tab/toggle non-interactable so it can't be re-picked — that's
+            // "already selected" (announced as checked), NOT "unavailable". Only flag a non-selected
+            // toggle that's genuinely disabled.
+            if (!toggle.isOn && !s.interactable) label = $"{label}, unavailable";
+        }
+        else if (!s.interactable)
             label = $"{label}, unavailable";
         return label;
     }
@@ -764,7 +770,7 @@ internal sealed class KeyboardNavigator : INavSection
         return label;
     }
 
-    private static string ResolveBaseLabel(Selectable s)
+    public static string ResolveBaseLabel(Selectable s)
     {
         // Composite widgets whose meaning is more than one text child — e.g. a shop product tile,
         // where the focused control's own text is just a price/icon. UiLabels reads the owning

@@ -600,8 +600,11 @@ internal sealed class HUBHomeScreen : IScreenHandler
             label = tmp != null && !string.IsNullOrEmpty(tmp.text) ? tmp.text : s.gameObject.name;
         }
 
-        var state = (s is Toggle t && t.isOn) ? "selected" : "not selected";
-        return s.interactable ? $"{label}, {state}" : $"{label}, {state}, unavailable";
+        bool selected = s is Toggle t && t.isOn;
+        var state = selected ? "selected" : "not selected";
+        // A selected tab is disabled by the game so it can't be re-picked — that's "selected", not
+        // "unavailable"; only a non-selected, disabled tab is genuinely unavailable.
+        return (s.interactable || selected) ? $"{label}, {state}" : $"{label}, {state}, unavailable";
     }
 
     // ---- FTUE coordination (ported from HUBProfileScreen) ----------------------------------

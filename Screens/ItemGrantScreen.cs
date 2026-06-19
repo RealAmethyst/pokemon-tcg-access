@@ -32,7 +32,12 @@ internal sealed class ItemGrantScreen : IScreenHandler
     private List<string> _lines = new();
     private int _lineIndex = -1;                    // -1 = on the name/header; 0..n-1 = detail lines
     private bool _finalAnnounced;
+    private bool _namePending;                       // a non-card reward whose title wasn't ready yet
     private int _focus;                             // 0 = the reward item, 1 = the Collect All button
+
+    private ContentItemRewardController_Booster? _booster;   // a pack being revealed card-by-card
+    private int _boosterState = int.MinValue;
+    private static MethodInfo? _onActiveClick;
 
     public string Name => "Rewards";
 
@@ -110,6 +115,14 @@ internal sealed class ItemGrantScreen : IScreenHandler
         _finalAnnounced = false;
 
         var item = _overlay.currentItem;
+
+        // A booster pack reveals its cards INSIDE one currentItem (ContentItemRewardController_Booster):
+        // each tap steps the 3D pack to the next card. The normal per-currentItem path would read the
+        // pack as a single item and Enter→OnClick would skip the whole pack, so drive the pack's own
+        // reveal here instead — card by card.
+        if (item is ContentItemRewardController_Booster booster) { TickBooster(booster); return; }
+        _booster = null;
+
         if (item != _shown)
         {
             _shown = item;
@@ -117,6 +130,8 @@ internal sealed class ItemGrantScreen : IScreenHandler
             _focus = 0;
             if (item != null) AnnounceItem(item, interrupt: true);
         }
+        else if (_namePending && item != null)
+            AnnounceItem(item, interrupt: true);   // title wasn't ready on the first pass — retry until it lands
 
         if (item != null)
         {
@@ -223,6 +238,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
     {
         if (item == null) return;
         _finalAnnounced = false;
+        _namePending = false;
         _lines = new List<string>();
 
         var granted = ReadField<GrantedItem>(item, "itemData");
@@ -237,18 +253,93 @@ internal sealed class ItemGrantScreen : IScreenHandler
         }
         else
         {
-            // Non-card reward (currency, token, sleeve, deck box, …) — read the overlay's OWN
-            // displayed name + amount (ContentItemRewardUI.titleTxt e.g. "Event Token" + footerTxt
-            // "Amount 10"), so it reads like what's on screen instead of a raw item id.
+            // Non-card reward (avatar item, currency, sleeve, …) — read the overlay's OWN displayed
+            // name + amount (ContentItemRewardUI.titleTxt / footerTxt). The reveal sets the title a beat
+            // AFTER the item appears, so on the first pass it can still be blank — never blurt the raw
+            // item id ("upper_f_035-002") as a fallback; flag it pending and re-announce (Tick retries)
+            // once the title lands.
             var ui = ReadField<Component>(item, "ui");
             var name = ui != null ? TmpOf(ReadField<Component>(ui, "titleTxt")) : null;
+            if (string.IsNullOrWhiteSpace(name)) { _namePending = true; return; }
+            _namePending = false;
             var amount = ui != null ? TmpOf(ReadField<Component>(ui, "footerTxt")) : null;
-            var parts = new List<string>();
-            if (!string.IsNullOrWhiteSpace(name)) parts.Add(name!);
+            var parts = new List<string> { name! };
             if (!string.IsNullOrWhiteSpace(amount)) parts.Add(amount!);
-            if (parts.Count == 0 && !string.IsNullOrEmpty(clientId)) parts.Add(clientId!);
-            _router.Speech.Say(parts.Count > 0 ? string.Join(", ", parts) : "Reward", interrupt);
+            _router.Speech.Say(string.Join(", ", parts), interrupt);
         }
+    }
+
+    // ---- booster pack reveal (card by card) ----
+
+    private void TickBooster(ContentItemRewardController_Booster booster)
+    {
+        if (!ReferenceEquals(booster, _booster)) { _booster = booster; _boosterState = int.MinValue; _shown = booster; _lineIndex = -1; }
+
+        int state = BoosterState(booster);
+        if (state != _boosterState)
+        {
+            _boosterState = state;
+            _lineIndex = -1;
+            if (state <= 0) _router.Speech.Say($"Opening pack, {booster.numberOfCards} cards", interrupt: true);
+            else AnnounceBoosterCard(booster, state - 1, interrupt: true);
+        }
+
+        // Down/Up walk the current card's detail lines; Enter reveals the next card (or finishes the pack).
+        if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow))
+        {
+            if (_lines.Count > 0) { _lineIndex = Mathf.Min(_lineIndex + 1, _lines.Count - 1); _router.Speech.Say(_lines[_lineIndex], interrupt: true); }
+        }
+        else if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow))
+        {
+            if (_lineIndex <= 0) { _lineIndex = -1; AnnounceBoosterCard(booster, _boosterState - 1, interrupt: true); }
+            else { _lineIndex--; _router.Speech.Say(_lines[_lineIndex], interrupt: true); }
+        }
+        else if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)
+              || UnityEngine.Input.GetKeyDown(KeyCode.Backspace))
+        {
+            AdvanceBooster(booster);   // step the real 3D pack to the next card (its own tap handler)
+        }
+    }
+
+    private void AnnounceBoosterCard(ContentItemRewardController_Booster booster, int index, bool interrupt)
+    {
+        _lines = new List<string>();
+        var cards = ReadField<System.Collections.IList>(booster, "cardsData");
+        if (cards == null || index < 0 || index >= cards.Count) { _router.Speech.Say("Pack", interrupt); return; }
+        var granted = cards[index] as GrantedItem;
+        var clientId = granted?.clientId;
+        var row = string.IsNullOrEmpty(clientId) ? null : CardDatabaseManager.instance?.TryGetCardFromDatabase(clientId);
+        if (row != null)
+        {
+            _lines = CardText.DetailLines(row);
+            var prefix = (granted != null && granted.isNewCard) ? "New, " : "";
+            _router.Speech.Say($"{prefix}{CardText.NameWithType(row)}, {index + 1} of {booster.numberOfCards}", interrupt);
+        }
+        else _router.Speech.Say(string.IsNullOrEmpty(clientId) ? "Card" : clientId!, interrupt);
+    }
+
+    // The interaction's `state`: the revealed card index + 1 (0 = the unopened pack, before the first tap).
+    private static int BoosterState(ContentItemRewardController_Booster booster)
+    {
+        var interaction = ReadField<Component>(booster, "interaction");
+        if (interaction == null) return int.MinValue;
+        var f = interaction.GetType().GetField("state", BindingFlags.Instance | BindingFlags.NonPublic);
+        return f?.GetValue(interaction) is int s ? s : int.MinValue;
+    }
+
+    // Step the pack to the next card via the interaction's own click handler (what a tap calls) — it
+    // reveals the next card, or finishes the pack (→ the next reward) once all are shown.
+    private static void AdvanceBooster(ContentItemRewardController_Booster booster)
+    {
+        try
+        {
+            var interaction = ReadField<Component>(booster, "interaction");
+            if (interaction == null) return;
+            _onActiveClick ??= interaction.GetType().GetMethod("OnActiveClick",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _onActiveClick?.Invoke(interaction, null);
+        }
+        catch (System.Exception ex) { Log.Error($"ItemGrant: booster advance threw: {ex.Message}"); }
     }
 
     private static string? TmpOf(Component? c)

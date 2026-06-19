@@ -722,13 +722,20 @@ internal sealed class BattleScreen : IScreenHandler
         // its option widgets synchronously and sets isOpen — exactly what the FTUE attack coach
         // waits on — then we navigate/click those real options rather than firing our own ops.
         bool overlayCard = (_zone == BattleBoardReader.Zone.MyActive || _zone == BattleBoardReader.Zone.MyBench) && myTurn;
-        if (overlayCard) TryOpenAttackOverlay(card);
+        // The in-play Stadium is activated exactly like a Pokémon ability — the game's StadiumController
+        // taps it open in the SAME AttackOverlay (focusMenu.Show) whenever it has a usable action. So a
+        // stadium with a usable ability gets the overlay too (ownership doesn't matter — stadiums are
+        // shared). Without a usable action it falls through to "No actions for <stadium>".
+        bool stadiumCard = _zone == BattleBoardReader.Zone.Stadium && myTurn
+                           && card.cardInfo != null && card.cardInfo.activeUsableActions != null
+                           && card.cardInfo.activeUsableActions.Count > 0;
+        if (overlayCard || stadiumCard) TryOpenAttackOverlay(card);
 
         _actions = BuildActions(card);
         if (_actions.Count == 0)
         {
             Log.Info($"OpenActionMenu no actions '{BattleBoardReader.CardName(card)}' zone={_zone} overlayCard={overlayCard} canPlace={canPlace}: {PlayDiag(card)}");
-            if (overlayCard) TryCloseAttackOverlay();
+            if (overlayCard || stadiumCard) TryCloseAttackOverlay();
             _router.Speech.Say($"No actions for {BattleBoardReader.CardName(card)}", interrupt: true);
             return;
         }
@@ -836,9 +843,13 @@ internal sealed class BattleScreen : IScreenHandler
         var list = new List<BattleAction>();
         var info = card?.cardInfo;
         if (card == null || !card.IsPublic || info == null) return list;
-        if (!info.isMyCard || _manager == null || !_manager.CanPerformNewActions) return list;
+        if (_manager == null || !_manager.CanPerformNewActions) return list;
 
         var where = Board.GetPlayerPos(info.currentPos);
+        // Stadiums are shared: whoever's turn it is may use the in-play stadium's ability (the server
+        // lists it in activeUsableActions) no matter who played it. Every other card needs ownership.
+        bool isStadium = where == PlayerPos.STADIUM;
+        if (!isStadium && !info.isMyCard) return list;
 
         if (where == PlayerPos.HAND)
         {
@@ -847,11 +858,12 @@ internal sealed class BattleScreen : IScreenHandler
             // auto-play for Item/Trainer/Supporter) — never via direct ops or this action menu.
             return list;
         }
-        if (where == PlayerPos.ACTIVE || where == PlayerPos.BENCH)
+        if (where == PlayerPos.ACTIVE || where == PlayerPos.BENCH || isStadium)
         {
             // Drive the game's REAL attack overlay options (opened in OpenActionMenu). Clicking an
             // option's OnClick() is the exact sighted-player flow (→ TryUseAction → confirmations →
-            // op) and is what the FTUE watches — never our own UseCard.
+            // op) and is what the FTUE watches — never our own UseCard. A stadium surfaces its effect
+            // here as an ability option.
             var overlay = _manager.attackOverlay;
             // The overlay must be open AND showing THIS card. The currentCard guard is the safety net
             // for the stale-overlay bug (see TryOpenAttackOverlay): if Show didn't re-point — e.g. a
@@ -866,7 +878,8 @@ internal sealed class BattleScreen : IScreenHandler
 
             // Retreat: gate on the game's own authoritative canRetreat flag (the overlay's own
             // RetreatClicked checks the same), clean "Retreat" label (no card-action detail/name).
-            var retreat = overlay.RetreatOption;
+            // Never on a stadium (it has no retreat — its overlay's RetreatOption is hidden anyway).
+            var retreat = isStadium ? null : overlay.RetreatOption;
             if (retreat != null)
             {
                 bool canRetreat = NetworkMatchController.currentMatchInfo?.canRetreat ?? false;
@@ -1143,6 +1156,14 @@ internal sealed class BattleScreen : IScreenHandler
     private void AttachPickup(Card3D card)
     {
         if (_attachSel == null || _manager == null || card == null) return;
+        // The energies sit in the menu's TEMPORARY hand; like any carousel/hand card they only become
+        // targetable once the placement context re-evaluates their just-settled positions. StartPickup
+        // gets this for free via ApplyIdleStatePlacementContext, but we must NOT switch contexts here —
+        // that would drop the menu's AttachCardToOtherCard purpose. So refresh the CURRENT (attach)
+        // context instead. This was the missing step and the likely cause of the reattach intermittently
+        // not taking online (the energy wasn't targetable yet, so TryTargetCard silently rejected it).
+        try { _manager.TargetingHandler.RefreshPlacementContext(); }
+        catch (Exception ex) { Log.Error($"BattleScreen: attach RefreshPlacementContext threw: {ex.Message}"); }
         _placeInit.Reset();
         if (!_manager.TargetingHandler.TryTargetCard(card, _placeInit))
         { _router.Speech.Say($"Can't attach {BattleBoardReader.CardName(card)}", interrupt: true); return; }
