@@ -338,9 +338,11 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         catch (Exception ex) { Log.Warn($"Decks: open editor failed: {ex.Message}"); }
     }
 
-    // The deck-options panel is an irregular grid (ACTIVE DECK + EDIT DECK on one row, then
-    // TEST/DUPLICATE/EXPORT/DELETE), so navigate it spatially — Right and Down differ correctly, and
-    // every option is reachable. Up at the top escapes back to the deck grid.
+    // The deck-options panel is an irregular grid (some options share a row), so navigate it
+    // spatially — Right/Left and Up/Down each move to the nearest option in that direction. Arrows
+    // STAY within the options (no edge-escape — it's a self-contained options panel, not a group
+    // visually stacked above the deck grid, so escaping up there reads as a non-sequitur). Tab /
+    // Shift+Tab moves between groups; Escape opens the ⋮ menu.
     private void TickDetail()
     {
         var nav = _detailNav;
@@ -348,7 +350,7 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         if (UnityEngine.Input.GetKeyDown(KeyCode.RightArrow)) nav.TrySpatialMove(1, 0);
         else if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow)) nav.TrySpatialMove(-1, 0);
         else if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow)) nav.TrySpatialMove(0, -1);
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow)) { if (!nav.TrySpatialMove(0, 1)) EnterSection(Section.Decks, announce: true, interruptPrior: true); }
+        else if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow)) nav.TrySpatialMove(0, 1);
         else if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)) nav.Activate();
     }
 
