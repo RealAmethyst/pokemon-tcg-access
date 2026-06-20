@@ -56,6 +56,7 @@ public class Mod : MelonMod
         AddFriendOverlayScreen.Install(HarmonyInstance, _router);
         FriendOptionsOverlayScreen.Install(HarmonyInstance, _router);
         SendJoinMatchOverlayScreen.Install(HarmonyInstance, _router);
+        MatchmakingOverlayScreen.Install(HarmonyInstance, _router);
         ConfirmOverlayScreen.Install(HarmonyInstance, _router);
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);

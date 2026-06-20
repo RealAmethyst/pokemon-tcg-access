@@ -174,10 +174,13 @@ internal sealed class HUBProfileScreen : IScreenHandler
     private void RestoreGroupFocus()
     {
         var g = _groups[_activeGroup];
+        // Announce where focus lands on the way back (e.g. closing the friends panel / a popup) so the
+        // user hears what they returned to. interrupt:false so it queues after any result message the
+        // closing screen just spoke rather than cutting it off.
         if (_indexAtPause >= 0 && _indexAtPause < g.Count)
-            g.FocusIndex(_indexAtPause, announce: false, interrupt: true);
+            g.FocusIndex(_indexAtPause, announce: true, interrupt: false);
         else
-            g.RefocusCurrent(announce: false);
+            g.RefocusCurrent(announce: true, interrupt: false);
     }
 
     // Native-state polling, modelled on DefaultFTUEController.WaitToEnable (which yields per

@@ -40,6 +40,13 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
     private KeyboardNavigator? _detailNav;
     private Button? _createButton;   // "CREATE A DECK", the deck grid's leftmost top item
 
+    // Challenge-deck-selection mode: the deck screen reached from a friend battle request. The
+    // controller shows returnToFriendJoinMatchButton (active only then), and LeaveDeckManager() routes
+    // back to the challenge through it. We surface that button + make Escape return to the challenge
+    // (instead of opening the ⋮ menu, which has no "back" otherwise).
+    private Button? _returnButton;
+    private bool _challengeMode;
+
     private readonly List<DeckSelectEntry> _entries = new();
     private int _deckIndex;   // -1 = the synthetic "Create a deck" item, 0..n = deck tiles
     private int _subIndexAtPause = -1;   // saved Top/Tabs/Detail position across a menu/popup pause
@@ -148,9 +155,15 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         // Forced tutorial focus (reparented element) — present + drive it; nothing else this tick.
         if (PresentFtueIfActive(interrupt: false)) { _ftueNav?.Tick(); return; }
 
-        // Escape opens the overflow (⋮) menu — the same affordance as the top-bar button. There's no
-        // other "back" on the deck list (the editor is a separate screen), so Escape is free here.
-        if (UnityEngine.Input.GetKeyDown(KeyCode.Escape)) { HUBOverflowMenuScreen.TryOpen(); return; }
+        // Escape: in challenge-deck-selection it returns to the battle request (the game's own
+        // LeaveDeckManager → returnToFriendJoinMatchButton); otherwise it opens the ⋮ menu (the deck
+        // list has no other "back" — the editor is a separate screen).
+        if (UnityEngine.Input.GetKeyDown(KeyCode.Escape))
+        {
+            if (_challengeMode && _controller != null) _controller.LeaveDeckManager();
+            else HUBOverflowMenuScreen.TryOpen();
+            return;
+        }
 
         if (UnityEngine.Input.GetKeyDown(KeyCode.Tab))
         {
@@ -191,8 +204,16 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
             if (overflow != null && overflow.isActiveAndEnabled && overflow.IsInteractable()) topItems.Add(overflow);
         }
         topItems = topItems.OrderBy(s => ReadingOrder(s.transform)).ToList();
+
+        // Challenge mode: surface the "return to the battle request" button (active only in this mode)
+        // at the front of the top strip so it's reachable, and remember we're in challenge mode so
+        // Escape goes back to the challenge.
+        _returnButton = ReadField<Button>(_controller, "returnToFriendJoinMatchButton");
+        _challengeMode = _returnButton != null && _returnButton.isActiveAndEnabled;
+        if (_challengeMode) topItems.Insert(0, _returnButton!);
+
         _topNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, AllowVertical = false, AllowHorizontal = true };
-        _topNav.SetItems(topItems, UiLabels.TopNavLabel);
+        _topNav.SetItems(topItems, TopLabel);
         _topNav.AllowVertical = false; _topNav.AllowHorizontal = true;   // strip: Left/Right within, Up/Down escapes sections
 
         // Grouping tabs (RECENTS / FAVORITES / ALL).
@@ -424,6 +445,13 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
     // while one is being driven.
     private bool PresentFtueIfActive(bool interrupt)
     {
+        if (FTUEHook.FtueIsRunning && !_ftueLoggedRunning)
+        {
+            _ftueLoggedRunning = true;
+            Log.Info($"Decks: FTUE running, focus={(FTUEHook.FocusedElement != null ? FTUEHook.FocusedElement.gameObject.name : "none")}");
+        }
+        if (!FTUEHook.FtueIsRunning) _ftueLoggedRunning = false;
+
         var focus = FTUEHook.FtueIsRunning ? FTUEHook.FocusedElement : null;
         if (focus == null || !focus.isActiveAndEnabled) { _ftueShown = null; return false; }
         if (focus != _ftueShown)
@@ -432,11 +460,18 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
             _ftueNav!.RadioToggleMode = focus is Toggle;
             _ftueNav.SetItems(new List<Selectable> { focus });
             _ftueNav.FocusFirst(announce: true, interruptPrior: interrupt);
+            Log.Info($"Decks: presenting FTUE focus '{focus.gameObject.name}'");
         }
         return true;
     }
+    private bool _ftueLoggedRunning;
 
     // ── Labels / reflection helpers ─────────────────────────────────────────────────────────────
+
+    // Top strip: HUB tabs use the persistent-nav label; the challenge "return" button reads as a clear
+    // action (its own text is a bare back-arrow / generic style name).
+    private string TopLabel(Selectable s)
+        => s == _returnButton ? "Return to battle request" : UiLabels.TopNavLabel(s);
 
     private static string ToggleLabel(Selectable s)
     {

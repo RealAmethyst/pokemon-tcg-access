@@ -107,6 +107,11 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
     // Last deck-editor tutorial target we announced (so the guidance isn't repeated every frame).
     private string _lastFtueCardId = string.Empty;
+    // While a tutorial CARD step is active and we've landed the cursor on its target card, card nav
+    // is locked to that card — the game reparents only the highlighted card above a blocker (others
+    // aren't clickable), so a keyboard user must not be able to wander onto a card that can't advance
+    // the tutorial. Empty = not locked (no card step, or the jump to the target failed).
+    private string _ftueCardLock = string.Empty;
 
     private bool _subscribedToFtue;
     private Selectable? _lastFtueTarget;
@@ -194,12 +199,14 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         ClearHold();
         RebuildSections();
 
-        if (FTUEHook.FtueIsRunning && FTUEHook.FocusedElement is { } t && t.isActiveAndEnabled)
+        if (FTUEHook.FtueIsRunning)
         {
-            // The FTUE highlighted a specific card/button — defer to the standard browse view but
-            // make the player aware. Full per-card FTUE targeting is a follow-up; the critical bit
-            // (placing through OnDrop so ftueDrop advances the tutorial) is handled by the drag.
-            _lastFtueTarget = FTUEHook.FocusedElement;
+            Log.Info($"DeckEditor OnEnter during FTUE: focus={(FTUEHook.FocusedElement != null ? FTUEHook.FocusedElement.gameObject.name : "none")}, cardId={FTUEHook.DeckEditorFtueCardId ?? "none"}, element={FTUEHook.DeckEditorFtueElement ?? "none"}, deckFtueActive={FTUEHook.DeckEditorFtueActive}");
+            if (FTUEHook.FocusedElement is { } t && t.isActiveAndEnabled)
+                // The FTUE highlighted a specific card/button — defer to the standard browse view but
+                // make the player aware. Full per-card FTUE targeting is a follow-up; the critical bit
+                // (placing through OnDrop so ftueDrop advances the tutorial) is handled by the drag.
+                _lastFtueTarget = FTUEHook.FocusedElement;
         }
 
         AnnounceIntro();
@@ -456,8 +463,13 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
     private void TickCardGroup(Kind kind)
     {
-        if (UnityEngine.Input.GetKeyDown(KeyCode.RightArrow)) { MoveCard(kind, +1); return; }
-        if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow)) { MoveCard(kind, -1); return; }
+        // During a tutorial card step, nav is locked to the target card (the only one the game lets you
+        // act on) — Left/Right re-read it instead of moving, so the player can't wander off the card
+        // that advances the tutorial. Pickup/place (Enter), Tab to the deck, read-lines and Inspect
+        // still work, so the step is completable.
+        bool ftueLocked = FTUEHook.FtueIsRunning && !string.IsNullOrEmpty(_ftueCardLock);
+        if (UnityEngine.Input.GetKeyDown(KeyCode.RightArrow)) { if (ftueLocked) ReadCard(kind, interrupt: true); else MoveCard(kind, +1); return; }
+        if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow)) { if (ftueLocked) ReadCard(kind, interrupt: true); else MoveCard(kind, -1); return; }
         if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow)) { ReadLine(+1); return; }
         if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow)) { ReadLine(-1); return; }
         if (UnityEngine.Input.GetKeyDown(KeyCode.I)) { Inspect(kind); return; }
@@ -744,12 +756,13 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     // just press Enter to pick it up; completing the action advances the FTUE via CompleteFtueDrop.
     private void UpdateFtueGuidance()
     {
-        if (!FTUEHook.FtueIsRunning) { _lastFtueCardId = string.Empty; ClearFtueFocus(); return; }
+        if (!FTUEHook.FtueIsRunning) { _lastFtueCardId = string.Empty; _ftueCardLock = string.Empty; ClearFtueFocus(); return; }
 
         var cardId = FTUEHook.DeckEditorFtueCardId;
         if (!string.IsNullOrEmpty(cardId))
         {
-            // Card step: jump to the target card; the user completes it via pickup/place (or I).
+            // Card step: jump to the target card and LOCK nav to it; the user completes it via
+            // pickup/place (or I). Locking mirrors the game blocking every other card behind a blocker.
             ClearFtueFocus();
             if (cardId == _lastFtueCardId) return;
             _lastFtueCardId = cardId!;
@@ -757,8 +770,9 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             var name = row != null ? row.LocalizedCardName : cardId;
             var element = FTUEHook.DeckEditorFtueElement ?? "";
             var verb = FtueVerb(element);
-            Log.Info($"DeckEditor FTUE target: element={element} card={cardId} ({name})");
             bool jumped = JumpToCard(cardId!);
+            _ftueCardLock = jumped ? cardId! : string.Empty;   // lock ONLY if we actually landed on it
+            Log.Info($"DeckEditor FTUE target: element={element} card={cardId} ({name}) jumped={jumped} -> {(jumped ? "locked" : "NOT locked")}");
             Say(jumped ? $"Tutorial: {verb} this card" : $"Tutorial: {verb} {name}", interrupt: false);
             return;
         }
@@ -767,6 +781,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         // under a Blocker and isn't in our sections, so present it directly for Enter — the same
         // real control a sighted player clicks. Mirrors HUBShopScreen.RebuildForFtue.
         _lastFtueCardId = string.Empty;
+        _ftueCardLock = string.Empty;
         var focus = FTUEHook.FocusedElement;
         if (focus == null || !focus.isActiveAndEnabled) { ClearFtueFocus(); return; }
         if (focus == _ftueFocusShown) return;

@@ -126,7 +126,10 @@ internal sealed class FriendsPanelScreen : IScreenHandler
     {
         Rebuild();
         if (_row < 0 || _row >= _rows.Count) _row = _rows.Count > 0 ? 0 : -1;
-        if (_row >= 0) AnnounceRow(interrupt: true);
+        // interrupt:false so that when a sub-overlay closed right after speaking something (e.g. Add
+        // Friend's "request sent"), this row announce QUEUES after it instead of cutting it off. When
+        // nothing's speaking it plays immediately anyway. See [[feedback_speech_queue_single_utterance]].
+        if (_row >= 0) AnnounceRow(interrupt: false);
     }
 
     public void OnExit() { }

@@ -217,12 +217,25 @@ internal sealed class AddFriendOverlayScreen : IScreenHandler
         ov.OnAddFriendFail?.AddListener(SpeakResult);
     }
 
+    // Speak the send-request outcome. The game reports it as a loc id; if that key isn't in the loaded
+    // table (resolves to "(Missing)…"), fall back to a plain-English message so the user always hears
+    // whether it worked. interrupt:true so it's spoken at once; on success the overlay then closes and
+    // the panel's resume announce QUEUES after this (FriendsPanelScreen.OnResume uses interrupt:false).
     private void SpeakResult(string locId)
     {
-        var s = LocalizationManager.Instance?.GetString(locId);
-        if (!string.IsNullOrWhiteSpace(s) && !s!.Contains("(Missing)"))
-            _router.Speech.Say(s, interrupt: true);
+        var loc = LocalizationManager.Instance?.GetString(locId);
+        string spoken = (!string.IsNullOrWhiteSpace(loc) && !loc!.Contains("(Missing)")) ? loc! : Fallback(locId);
+        Log.Info($"AddFriend result: {locId} -> loc='{loc}' spoken='{spoken}'");
+        if (!string.IsNullOrWhiteSpace(spoken)) _router.Speech.Say(spoken, interrupt: true);
     }
+
+    private static string Fallback(string locId) => locId switch
+    {
+        "friend_add_friend_success" => "Friend request sent",
+        "friend_add_friend_already_friends" => "Already friends, or a request is already pending",
+        "friend_max_friend_title" => "Your friend list is full",
+        _ => "Could not send friend request",
+    };
 
     private static bool IsVisible(AddFriendOverlayScreenGroup? ov)
     {
