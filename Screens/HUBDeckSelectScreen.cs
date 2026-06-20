@@ -242,11 +242,26 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         _detailNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
         _detailNav.SetItems(detailItems);
 
-        // CREATE A DECK — the deck grid's own button (a child of the grid that isn't a deck tile).
-        var grid = ReadField<Component>(_controller, "deckSelectGrid");
-        _createButton = grid != null
-            ? grid.GetComponentsInChildren<Button>(includeInactive: false).FirstOrDefault(b => b.GetComponentInParent<DeckSelectEntry>() == null)
-            : null;
+        // CREATE A DECK — read the game's own create-deck prefab button (DeckSelectList.createDeckPrefab
+        // → GetComponentInChildren<Button>, the exact button the game wires to CreateNewDeckButtonActions).
+        // A game update moved/restructured that prefab so the old "scan deckSelectGrid for a button not
+        // inside a DeckSelectEntry" stopped finding it, and the button vanished from nav. (Fallback: the
+        // old grid scan, in case createDeckPrefab is ever unreadable.)
+        _createButton = null;
+        var deckListObj = CallMethod<object>(_controller, "GetDeckList");
+        if (deckListObj != null)
+        {
+            var createPrefab = ReadField<GameObject>(deckListObj, "createDeckPrefab");
+            if (createPrefab != null) _createButton = createPrefab.GetComponentInChildren<Button>(includeInactive: true);
+        }
+        if (_createButton == null)
+        {
+            var grid = ReadField<Component>(_controller, "deckSelectGrid");
+            if (grid != null)
+                _createButton = grid.GetComponentsInChildren<Button>(includeInactive: false)
+                    .FirstOrDefault(b => b.GetComponentInParent<DeckSelectEntry>() == null);
+        }
+        Log.Info($"Decks: create button = {(_createButton != null ? $"{_createButton.gameObject.name} (active={_createButton.isActiveAndEnabled})" : "NOT FOUND")}");
 
         RefreshEntries();
     }

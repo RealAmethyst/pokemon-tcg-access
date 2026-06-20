@@ -361,6 +361,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             .Cast<Selectable>().ToList();
         _topNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
         _topNav.SetItems(topButtons);
+        // These buttons are scattered across the top bar AND the right deck panel, so auto-axis
+        // detection strands one cluster (only the first few were reachable). Force a flat Up/Down list
+        // so every option is reachable in reading order. See [[feedback_auto_detect_axes]].
+        _topNav.ForceFlatVertical();
 
         // The library's filtered list loads asynchronously (and re-loads on category/search/filter
         // changes). Subscribe to its own change callback so we focus card 0 the moment it's ready,
@@ -393,8 +397,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     {
         Section.Top => _topNav != null && _topNav.Count > 0,
         Section.Tabs => _tabsNav != null && _tabsNav.Count > 0,
-        Section.Deck => _deckCards.Length > 0,
-        Section.Library => _libCount > 0 || _libAwaitingLoad,
+        // While holding a card to ADD, the Deck section must be reachable even when empty — otherwise
+        // you can't Tab to it to drop the first card. Same for the Library while holding a card to REMOVE.
+        Section.Deck => _deckCards.Length > 0 || (_holding && _heldAction == CardEditorDrag.CardDropAction.Add),
+        Section.Library => _libCount > 0 || _libAwaitingLoad || (_holding && _heldAction == CardEditorDrag.CardDropAction.Remove),
         _ => false,
     };
 
@@ -432,8 +438,18 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             case Section.Top: _topNav?.FocusFirst(announce, interruptPrior); break;
             case Section.Tabs: _tabsNav?.FocusFirst(announce, interruptPrior); break;
             case Section.Deck:
-                if (announce) Say(_deckGroupName, interruptPrior);   // section name, then the card queues
-                DeckFocus(0, announce, interrupt: false);
+                if (_deckCards.Length == 0)
+                {
+                    // Empty deck (reachable while holding a card to add) — announce it so the user knows
+                    // they're on the deck and can drop here; Enter then places the held card.
+                    _deckIndex = -1;
+                    if (announce) Say($"{_deckGroupName}, empty", interruptPrior);
+                }
+                else
+                {
+                    if (announce) Say(_deckGroupName, interruptPrior);   // section name, then the card queues
+                    DeckFocus(0, announce, interrupt: false);
+                }
                 break;
             case Section.Library:
                 RefreshLibraryCount();
