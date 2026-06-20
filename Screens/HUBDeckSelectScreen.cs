@@ -38,6 +38,7 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
     private KeyboardNavigator? _topNav;
     private KeyboardNavigator? _tabsNav;
     private KeyboardNavigator? _detailNav;
+    private Button? _setActiveBtn;    // the live SET ACTIVE button (only for a non-active valid deck), matched by identity for labeling
     private Button? _createButton;   // "CREATE A DECK", the deck grid's leftmost top item
 
     // Challenge-deck-selection mode: the deck screen reached from a friend battle request. The
@@ -227,20 +228,7 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         _tabsNav.SetItems(groupToggles, ToggleLabel);
         _tabsNav.AllowVertical = false; _tabsNav.AllowHorizontal = true;
 
-        // Detail panel buttons (EDIT DECK / SET ACTIVE / TEST / …).
-        var panel = CallMethod<Component>(_controller, "GetDeckPanel");
-        var detailItems = panel != null
-            ? panel.GetComponentsInChildren<Selectable>(includeInactive: false)
-                // The detail panel requires a ModifiedDeckPanel, which spawns the deck's cards as
-                // CardStubParts children — exclude those (they have no readable label, just card-set
-                // ids like "sm12_001", and their row throws off the spatial nav). Leaves only the real
-                // option buttons (CUSTOMIZATION / TEST / DUPLICATE / VIEW / STATS / EXPORT / DELETE / …).
-                .Where(s => (s is Button || s is Toggle) && s.isActiveAndEnabled
-                            && s.GetComponentInParent<CardStubParts>() == null)
-                .OrderBy(s => ReadingOrder(s.transform)).ToList()
-            : new List<Selectable>();
-        _detailNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
-        _detailNav.SetItems(detailItems);
+        RebuildDetail();
 
         // CREATE A DECK — read the game's own create-deck prefab button (DeckSelectList.createDeckPrefab
         // → GetComponentInChildren<Button>, the exact button the game wires to CreateNewDeckButtonActions).
@@ -264,6 +252,62 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         Log.Info($"Decks: create button = {(_createButton != null ? $"{_createButton.gameObject.name} (active={_createButton.isActiveAndEnabled})" : "NOT FOUND")}");
 
         RefreshEntries();
+    }
+
+    // Detail panel = a flat vertical LIST of deck actions, in reading order:
+    //   favorite ★ · rename ✎ · options ⋮ · SET ACTIVE · CUSTOMIZE · EDIT DECK · TEST DECK.
+    // (The cards below are content — CardStubParts, excluded.) It's a menu, so we navigate it as a
+    // list (Up/Down through every option); the old 2-D spatial nav made Left/Right jump to unexpected
+    // options on this irregular header-row + full-width-button + action-row layout.
+    //
+    // Re-scanned on every entry to Section.Detail, NOT once at Rebuild(): the panel reflects the
+    // currently-selected deck, and SET ACTIVE is only a live (active) button for a non-active, valid
+    // deck. The active deck — which GetDefaultDeckEntry() picks as the default selection on entering
+    // DECKS — hides it (SetActiveDeckButtonParts.SetState(DISABLED) → activeState.SetActive(false)),
+    // so a one-shot scan would capture the active deck's panel and permanently miss SET ACTIVE for
+    // every other deck. The selection→panel update is synchronous, so the live hierarchy is correct
+    // by the time the user Tabs into the section.
+    private void RebuildDetail()
+    {
+        if (_controller == null) return;
+        var panel = CallMethod<Component>(_controller, "GetDeckPanel");
+        var items = new List<Selectable>();
+        if (panel != null)
+        {
+            items = panel.GetComponentsInChildren<Selectable>(includeInactive: false)
+                .Where(s => (s is Button || s is Toggle) && s.isActiveAndEnabled
+                            && s.GetComponentInParent<CardStubParts>() == null)
+                .ToList();
+
+            // Guarantee SET ACTIVE is present by pulling the game's own setActiveButton reference from
+            // SetActiveDeckButtonParts, rather than trusting the generic descendant scan to reach it
+            // (it lives in a nested state-swapper that toggles activeState on/off per deck). Only added
+            // when it's the live, clickable button — i.e. a non-active valid deck.
+            var sadbp = ReadField<Component>(panel, "setActiveDeckButtonParts");
+            var setBtn = sadbp != null ? ReadField<Button>(sadbp, "setActiveButton") : null;
+            _setActiveBtn = setBtn != null && setBtn.isActiveAndEnabled ? setBtn : null;
+            if (_setActiveBtn != null && !items.Contains(_setActiveBtn)) items.Add(_setActiveBtn);
+        }
+        items = items.OrderBy(s => ReadingOrder(s.transform)).ToList();
+        _detailNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
+        _detailNav.SetItems(items, DetailLabel);
+        _detailNav.ForceFlatVertical();   // predictable Up/Down list, not a confusing spatial grid
+        Log.Info($"Decks detail: {items.Count} options [{string.Join(", ", items.Select(s => s.gameObject.name))}]");
+    }
+
+    // The SET ACTIVE button is matched by identity (the game's own setActiveButton reference), not by
+    // name/text. Its clickable target can carry no worded label of its own (the "SET ACTIVE" text sits
+    // on a sibling dynamic-button state object), so if the text-scrape finds no real word, name it
+    // explicitly. Every other option keeps the default text-scrape label.
+    private string DetailLabel(Selectable s)
+    {
+        if (_setActiveBtn != null && s == _setActiveBtn)
+        {
+            var baseLabel = KeyboardNavigator.ResolveBaseLabel(s);
+            if (!baseLabel.Any(char.IsLetter) || baseLabel.Equals("button", StringComparison.OrdinalIgnoreCase))
+                return "Set active";
+        }
+        return KeyboardNavigator.DefaultLabel(s);
     }
 
     private void RefreshEntries()
@@ -300,6 +344,9 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
 
     private void EnterSection(Section s, bool announce, bool interruptPrior)
     {
+        // Re-scan the detail panel against the live deck selection before entering it, so SET ACTIVE
+        // appears for a non-active valid deck (it's hidden for the active deck, the default selection).
+        if (s == Section.Detail) RebuildDetail();
         if (!SectionHasContent(s)) s = Section.Decks;
         _section = s;
         switch (s)
@@ -374,21 +421,11 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         catch (Exception ex) { Log.Warn($"Decks: open editor failed: {ex.Message}"); }
     }
 
-    // The deck-options panel is an irregular grid (some options share a row), so navigate it
-    // spatially — Right/Left and Up/Down each move to the nearest option in that direction. Arrows
-    // STAY within the options (no edge-escape — it's a self-contained options panel, not a group
-    // visually stacked above the deck grid, so escaping up there reads as a non-sequitur). Tab /
-    // Shift+Tab moves between groups; Escape opens the ⋮ menu.
-    private void TickDetail()
-    {
-        var nav = _detailNav;
-        if (nav == null || nav.Count == 0) return;
-        if (UnityEngine.Input.GetKeyDown(KeyCode.RightArrow)) nav.TrySpatialMove(1, 0);
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow)) nav.TrySpatialMove(-1, 0);
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow)) nav.TrySpatialMove(0, -1);
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow)) nav.TrySpatialMove(0, 1);
-        else if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)) nav.Activate();
-    }
+    // The deck-options panel is a flat vertical list of deck actions (see RebuildDetail): Up/Down
+    // step through every option, Enter/Space activates. Arrows STAY within the options (no edge-
+    // escape — it's a self-contained menu); Tab / Shift+Tab moves between sections and Escape opens
+    // the ⋮ menu, both consumed in Tick() before we get here.
+    private void TickDetail() => _detailNav?.Tick();
 
     // Horizontal strip (top nav / grouping tabs): Left/Right within; Up/Down escape to the section
     // above/below — the HOME-style arrow escape so the top strip is reachable without Tab.
@@ -445,12 +482,41 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
         var entry = _entries[_deckIndex];
         var deck = entry.storedDeck;
         var label = entry.DeckName;
-        bool valid = false, active = false;
+        bool valid = false;
         try { valid = deck.IsValid(HUBGameModeController.gameMode); } catch { }
-        try { active = _controller!.IsActiveDeck(deck); } catch { }
         var status = valid ? "valid" : "invalid";
-        if (active) status += ", active";
+
+        // A deck can be the active deck for more than one format at once — the game shows one coloured
+        // check per mode on the tile (e.g. one deck active for Standard, another for Expanded). Say
+        // exactly which format(s): "active for Standard", "active for Standard and Expanded" — so two
+        // decks each active for a different format don't both read a bare, ambiguous "active". Mode
+        // names come from the game's own GetGameModeLocString; a mode with no player-facing name (NONE,
+        // Speed, …) falls back to a plain "active".
+        var modeNames = new List<string>();
+        bool anyActive = false;
+        try
+        {
+            foreach (var mode in HUBGameModeController.GetOrderedGameModes())
+            {
+                if (!HUBDeckSelectController.IsActiveDeckForMode(mode, deck)) continue;
+                anyActive = true;
+                var name = Loc(HUBGameModeController.GetGameModeLocString(mode), "");
+                if (!string.IsNullOrWhiteSpace(name)) modeNames.Add(name.Trim());
+            }
+        }
+        catch { }
+        if (modeNames.Count > 0) status += ", active for " + Conjoin(modeNames);
+        else if (anyActive) status += ", active";
+
         _router.Speech.Say(Speech.Announce.Item($"{label}, {status}", description: null, index: _deckIndex + 1, total: _entries.Count), interrupt);
+    }
+
+    // Join names for speech: "A", "A and B", "A, B and C".
+    private static string Conjoin(List<string> parts)
+    {
+        if (parts.Count <= 1) return parts.Count == 1 ? parts[0] : "";
+        if (parts.Count == 2) return parts[0] + " and " + parts[1];
+        return string.Join(", ", parts.Take(parts.Count - 1)) + " and " + parts[parts.Count - 1];
     }
 
     // ── FTUE ──────────────────────────────────────────────────────────────────────────────────

@@ -197,6 +197,19 @@ internal sealed class KeyboardNavigator : INavSection
         AllowHorizontal = false;
     }
 
+    // Force a flat single-ROW horizontal strip, overriding the bounding-box auto-detection. Call AFTER
+    // SetItems. Use for a row of controls that are conceptually one left-to-right strip but sit at
+    // slightly different heights (e.g. a screen header: back / info / rewards) — auto-detect would read
+    // them as a 1-column vertical list (Columns=1), and Left/Right (which uses sameRowOnly) then can't
+    // cross "rows", stranding every item but the first. With Columns = item count all items share row 0,
+    // so Left/Right steps through every one in order.
+    public void ForceFlatHorizontal()
+    {
+        Columns = Mathf.Max(1, _items.Count);
+        AllowVertical = false;
+        AllowHorizontal = true;
+    }
+
     // Count of items in the first visual row — used by Up/Down to jump rows instead of items.
     // Items are expected ordered top-to-bottom, left-to-right (HUBProfileScreen.RebuildGroups
     // does this via ReadingOrder). We count consecutive items whose y matches the first

@@ -55,6 +55,11 @@ internal sealed class ScreenRouter
     public void Activate(IScreenHandler handler)
     {
         if (_stack.Count > 0 && _stack.Peek() == handler) return;
+        // Already somewhere in the stack but not on top: re-pushing would leave a duplicate that can
+        // never fully unwind (its first copy is stranded under the rest). This happens if an overlay
+        // re-activates while it's paused beneath a nested overlay. Don't duplicate — the existing entry
+        // already owns its slot; just refresh it in place so a re-announce still happens.
+        if (_stack.Contains(handler)) { Log.Info($"Screen re-activate (in stack): {handler.Name}"); handler.OnResume(); return; }
         if (_stack.Count > 0)
         {
             var paused = _stack.Peek();

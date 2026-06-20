@@ -52,7 +52,23 @@ internal sealed class MatchmakingOverlayScreen : IScreenHandler
             return;
         }
         harmony.Patch(activate, postfix: new HarmonyMethod(AccessTools.Method(typeof(MatchmakingOverlayScreen), nameof(Activate_Postfix))));
+
+        // "Opponent found": the game signals this only with an audio stinger + the cancel button
+        // hiding, then it loads the versus scene — no on-screen text — so a blind player otherwise
+        // can't tell the search succeeded. Announce it off MatchCreated().
+        var matchCreated = AccessTools.Method(typeof(MatchmakingOverlay), "MatchCreated");
+        if (matchCreated != null)
+            harmony.Patch(matchCreated, postfix: new HarmonyMethod(AccessTools.Method(typeof(MatchmakingOverlayScreen), nameof(MatchCreated_Postfix))));
+
         Log.Info("MatchmakingOverlayScreen installed");
+    }
+
+    private static void MatchCreated_Postfix(MatchmakingOverlay __instance)
+    {
+        if (_instance == null || _instance._overlay != __instance) return;
+        if (!__instance.gameObject.activeInHierarchy) return;
+        _instance._router.Speech.Say("Opponent found, starting match", interrupt: true);
+        Log.Info("Matchmaking: opponent found");
     }
 
     private static void Activate_Postfix(MatchmakingOverlay __instance)

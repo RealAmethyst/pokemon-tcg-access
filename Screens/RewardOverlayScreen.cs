@@ -87,14 +87,25 @@ internal sealed class RewardOverlayScreen : IScreenHandler
     {
         if (_controller == null) { if (_active) { _active = false; _router.Deactivate(this); } return; }
         if (!Application.isFocused) return;
-        // Backstop: if the overlay closed without going through CloseScreen (e.g. CloseAllOverlays),
-        // let go so the HUB underneath regains focus.
+        // Backstop: let go so the HUB underneath regains focus once the reward overlay is no longer
+        // showing. CRITICAL: a HUB overlay closed via OverlayManager (OnDeActivate) only disables its
+        // CANVAS — the GameObject stays activeInHierarchy — so that flag alone is unreliable (a nested
+        // reward, e.g. claiming on Casual → an item-grant reveal pops back to here, left us STUCK).
+        // The authoritative signal is OverlayManager: when our overlay is no longer the current open
+        // overlay, the flow is done. (Reward overlays register with the global OverlayManager — same
+        // ManagerSingleton<OverlayManager>.currentOverlay the game's own IsCurrentOverlay checks.)
         var ov = _controller.activeOverlay;
-        if (ov == null || !ov.gameObject.activeInHierarchy)
+        if (ov == null || !ov.gameObject.activeInHierarchy || !IsOverlayCurrent(ov))
         {
             _active = false; _router.Deactivate(this); _controller = null; return;
         }
         _nav.Tick();
+    }
+
+    private static bool IsOverlayCurrent(OverlayScreenGroup ov)
+    {
+        try { return ManagerSingleton<OverlayManager>.instance?.currentOverlay == ov; }
+        catch { return true; }   // if the manager isn't reachable, don't yank focus prematurely
     }
 
     private void Rebuild(bool announce)

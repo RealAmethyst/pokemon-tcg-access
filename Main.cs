@@ -61,6 +61,10 @@ public class Mod : MelonMod
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);
         HUBExpansionChallengeScreen.Install(HarmonyInstance, _router);
+        LeagueTowerScreen.Install(HarmonyInstance, _router);
+        InfoPopupScreen.Install(HarmonyInstance, _router);
+        BnbPopupScreen.Install(HarmonyInstance, _router);
+        BnbLobbyScreen.Install(_router);
         ShopProductOverlayScreen.Install(HarmonyInstance, _router);
         BundlesOverlayScreen.Install(HarmonyInstance, _router);
         HUBDeckSelectScreen.Install(HarmonyInstance, _router);
@@ -94,6 +98,8 @@ public class Mod : MelonMod
         FriendsPanelScreen.Poll();
         // Add-friend search isn't opened via OverlayManager (no OnActivate) — driven by its events.
         AddFriendOverlayScreen.Poll();
+        // B&B run lobby is a standalone-scene MonoBehaviour (no OnActivate hook) — detect by polling.
+        BnbLobbyScreen.Poll();
         _router?.Tick();
         // Global "read my balances" key (P) — acts only on screens showing the HUB currency bar.
         CurrencyReader.Tick();

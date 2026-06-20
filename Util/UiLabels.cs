@@ -50,6 +50,15 @@ internal static class UiLabels
     {
         if (s == null) return null;
 
+        // HOME rank hex (Btn_Rank): its only text child is the bare rank-points number, so name it with
+        // the full ranked status — league, rank tier, points, and points-to-next — read from the live
+        // season config. Falls through to the "Rank" friendly name (below) until the season data loads.
+        if (s.gameObject.name == "Btn_Rank")
+        {
+            var rank = RankReader.Status();
+            if (!string.IsNullOrEmpty(rank)) return rank;
+        }
+
         // Shop product tile (booster pack, bundle, collection, …) → "name, price, N available".
         // The focused control sits INSIDE the tile (its own text is just a price/icon), so we read
         // the owning ShopProductController. See ShopLabels.

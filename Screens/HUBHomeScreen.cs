@@ -10,6 +10,7 @@ using PokemonTCGLiveAccessibility.Util;
 using TMPro;
 using TPCI.Coroutines;
 using TPCI.Localization;
+using TPCI.UI.MenuCarousel;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -49,6 +50,7 @@ internal sealed class HUBHomeScreen : IScreenHandler
     // the active LEARN tab steps into it and Up returns to the tabs. _pendingEnterContent records
     // an Enter-on-LEARN whose list is still loading (async) so we dive in once it appears.
     private LearningLabSection? _llSection;
+    private BnbPlaySection? _bnbSection;
     private bool _pendingEnterContent;
     private string _lastContentSig = string.Empty;
     private PageDragTab[]? _modeTabs;
@@ -135,7 +137,7 @@ internal sealed class HUBHomeScreen : IScreenHandler
         RebuildGroups();
         if (_groups.Count == 0) return;
         _activeGroup = PickDefaultGroup();
-        _groups[_activeGroup].FocusFirst(announce: false);
+        FocusDefaultGroup(announce: false, interruptPrior: true);
 
         if (FTUEHook.FtueIsRunning)
         {
@@ -144,6 +146,15 @@ internal sealed class HUBHomeScreen : IScreenHandler
         }
 
         Announce();
+    }
+
+    // Land on the default group's natural item: for the game-mode tab strip that's the ACTIVE (selected)
+    // mode, not the first tab — so entering HOME announces "Casual, selected" (the mode you're actually
+    // in) rather than always "Ranked". Any other default group just focuses its first item.
+    private void FocusDefaultGroup(bool announce, bool interruptPrior)
+    {
+        if (_activeGroup == _tabGroupIndex) FocusActiveTab(announce, interruptPrior);
+        else if (_activeGroup >= 0 && _activeGroup < _groups.Count) _groups[_activeGroup].FocusFirst(announce, interruptPrior);
     }
 
     public void OnResume()
@@ -222,13 +233,18 @@ internal sealed class HUBHomeScreen : IScreenHandler
         }
         if (!Application.isFocused) return;
 
-        // React to a game-mode tab switch / the Learning Lab loading or hiding: the content
-        // section changes, so rebuild and (if the user just picked LEARN) drop into the lessons.
-        // Gated off during FTUE, where focus is tutorial-driven (RebuildForFtue).
+        // React to a game-mode tab switch / the Learning Lab loading or hiding. A mode switch settles
+        // ASYNCHRONOUSLY: the content signature changes every frame while the old mode's panel animates
+        // out and the new one animates in (PlayMode_In). So on every change we rebuild + keep focus
+        // SILENTLY, and only once the content has stopped changing AND the animation has settled do we
+        // complete a pending Enter-on-tab dive — never landing on a transient (the "casual speaks info"
+        // bug). Gated off during FTUE, where focus is tutorial-driven (RebuildForFtue).
         if (!FTUEHook.FtueIsRunning)
         {
             var sig = ContentSig();
             if (sig != _lastContentSig) { _lastContentSig = sig; OnContentChanged(); return; }
+            // Content stable this tick → finish the dive if the mode-switch animation has settled.
+            if (_pendingEnterContent && TryCompleteDive()) return;
         }
 
         if (_groups.Count == 0) return;
@@ -279,29 +295,28 @@ internal sealed class HUBHomeScreen : IScreenHandler
             return;
         }
 
-        // On the game-mode tabs, Enter dives into that tab's content rather than just re-speaking:
-        //  - already on the LEARN tab with the list showing → step straight into the lessons;
-        //  - on any other tab → select the mode (radio); if it turns out to be LEARN, the list
-        //    loads async and the content-change handler above dives in when it appears.
+        // On the game-mode tabs, Enter dives into that tab's content section (rather than just
+        // re-speaking) — the same step-into-the-section behaviour for every mode (LEARN lessons,
+        // RANKED's rank hex / play area, CASUAL later):
+        //  - already on this mode with its content built → step straight into the first item;
+        //  - otherwise select the mode and ARM the dive — the content may load async, so
+        //    OnContentChanged completes the dive once it appears.
         bool enter = UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter);
         if (_activeGroup == _tabGroupIndex && enter && nav is KeyboardNavigator tabsNav)
         {
             var cur = tabsNav.Current as Toggle;
             bool wasOn = cur != null && cur.isOn;
-            // Already on LEARN with the lessons loaded → step straight in.
-            if (wasOn && LearnModeSelected && LearningLabSection.IsShowing && _mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count)
+            // Already on this mode with its content present and settled → step straight in. Otherwise
+            // select the mode and ARM the dive; TryCompleteDive finishes it once the switch settles.
+            if (wasOn && ContentSectionReady() && TransitionSettled())
             {
                 _pendingEnterContent = false;
                 _activeGroup = _mainGroupIndex;
                 _groups[_activeGroup].FocusFirstRow(announce: true, interruptPrior: true);
                 return;
             }
-            // Select the focused mode (radio) / re-announce an already-selected one. If that mode is
-            // LEARN, its lessons load asynchronously — arm the dive so OnContentChanged steps in when
-            // they appear (and re-arm on a repeat Enter pressed while still loading). Any non-LEARN
-            // mode has no drop-in content section, so this clears a stale pending dive.
-            tabsNav.Activate(isSpaceKey: false);
-            _pendingEnterContent = LearnModeSelected && !LearningLabSection.IsShowing;
+            tabsNav.Activate(isSpaceKey: false);   // select the mode (no-op if already selected)
+            _pendingEnterContent = true;           // dive once this mode's content is ready + settled
             return;
         }
 
@@ -313,9 +328,9 @@ internal sealed class HUBHomeScreen : IScreenHandler
         if (_groups.Count == 0) return;
         if (!_hasAnnouncedAtAll)
         {
-            // Speak the screen name once, then queue the focused item after it.
+            // Speak the screen name once, then queue the focused item (the active mode tab) after it.
             _router.Speech.Say(Name, interrupt: true);
-            _groups[_activeGroup].FocusFirst(announce: true, interruptPrior: false);
+            FocusDefaultGroup(announce: true, interruptPrior: false);
             _hasAnnouncedAtAll = true;
         }
         else
@@ -334,6 +349,7 @@ internal sealed class HUBHomeScreen : IScreenHandler
         _tabGroupIndex = -1;
         _mainGroupIndex = -1;
         _llSection = null;
+        _bnbSection = null;
         if (_controller == null) { _lastContentSig = ContentSig(); return; }
 
         var gmc = ReadField<HUBGameModeController>(_controller, "gameModeController");
@@ -403,10 +419,26 @@ internal sealed class HUBHomeScreen : IScreenHandler
         // Under the LEARN tab the content is the Learning Lab lesson list, which is a drill-down
         // over the lesson data (not standard Selectables), so it gets its own section type.
         // Otherwise it's the normal sweep: PLAY + carousel arrows + anything else.
-        if (LearningLabSection.IsShowing)
+        // Gate on LearnModeSelected too, not just IsShowing: when switching AWAY from LEARN the
+        // gameplayType flips synchronously but the lessons GameObject (→ IsShowing) stays active a
+        // frame or more, so building the LL section purely on IsShowing would make it the main content
+        // of the mode we just left — and the dive would re-read it ("spoke Learn Lab after pressing
+        // Ranked"). Treat the LL list as content only while LEARN is genuinely the selected mode.
+        if (LearningLabSection.IsShowing && LearnModeSelected)
         {
             _llSection = new LearningLabSection(_router.Speech, EscapeFromLearningLabToTabs);
             _groups.Add(_llSection);
+            _mainGroupIndex = _groups.Count - 1;
+        }
+        else if (HUBGameModeController.gameplayType == GameplayType.BuildAndBattle
+                 && new BnbPlaySection(_router.Speech, EscapeFromBnbToTabs) is { Count: > 0 } bnb)
+        {
+            // Build & Battle content is an event buy-in carousel (instruction slides whose captions are
+            // info text, not Selectables, + prev/next + the PLAY/buy-in button + an "ends in" timer), so
+            // it gets its own section that reads the slide captions and timer. Only used when its screen
+            // resolves; otherwise we fall through to the generic sweep.
+            _bnbSection = bnb;
+            _groups.Add(bnb);
             _mainGroupIndex = _groups.Count - 1;
         }
         else
@@ -440,7 +472,21 @@ internal sealed class HUBHomeScreen : IScreenHandler
             if (main.Count > 0)
             {
                 foreach (var s in main) known.Add(s);
-                AddGroup(main);
+                if (HUBGameModeController.gameplayType == GameplayType.Casual)
+                {
+                    // Casual content is the format CAROUSEL — the Standard / Expanded / Custom hexes
+                    // (each a real Button) + the info ⓘ. The hexes sit a little lower than the info
+                    // button, so auto-detect strands it as a 1-column list and Left/Right can't move
+                    // (the "info, 1 of 6, nothing else" bug). Drop the redundant carousel rotation
+                    // arrows (the hexes are directly selectable), order the formats left-to-right with
+                    // info last, and force a flat horizontal strip.
+                    var casual = main.Where(s => !IsCarouselArrow(s))
+                        .OrderBy(s => s.gameObject.name.IndexOf("Info", System.StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 0)
+                        .ThenBy(s => s.transform.position.x)
+                        .ToList();
+                    AddGroup(casual, resolver: CasualLabel, flatHorizontal: true);
+                }
+                else AddGroup(main);
                 _mainGroupIndex = _groups.Count - 1;
             }
         }
@@ -471,6 +517,7 @@ internal sealed class HUBHomeScreen : IScreenHandler
         _tabGroupIndex = -1;
         _mainGroupIndex = -1;
         _llSection = null;
+        _bnbSection = null;
 
         // Keep the content signature current (the game-mode tabs persist) so leaving FTUE doesn't
         // trigger a spurious content-change rebuild on the first normal tick.
@@ -498,56 +545,127 @@ internal sealed class HUBHomeScreen : IScreenHandler
 
     // ---- Learning Lab / content-change integration -----------------------------------------
 
-    // Signature of "what content section should exist": the active game-mode tab + whether the
-    // Learning Lab list is showing. Changes only on a tab switch or the LL loading/hiding —
-    // discrete events — so comparing it each tick is a cheap, alloc-free way to know when to
-    // rebuild the section list. Reads the cached PageDragTab refs (valid for the screen's life).
+    // Signature of "what content should exist": the active game-mode tab, whether the Learning Lab
+    // list is showing, AND a fingerprint of the play-area's interactive elements. Changes on a tab
+    // switch, the LL loading/hiding, OR the game filling in async content — so comparing it each tick
+    // tells us when to rebuild.
     private string ContentSig()
     {
         var tab = "none";
         if (_modeTabs != null)
             foreach (var pdt in _modeTabs)
                 if (pdt != null && pdt.toggle != null && pdt.toggle.isOn) { tab = pdt.gameObject.name; break; }
-        return tab + "|" + (LearningLabSection.IsShowing ? "LL" : "-");
+        return tab + "|" + (LearningLabSection.IsShowing ? "LL" : "-") + "|" + MainContentFingerprint();
     }
 
-    // The game-mode tab changed (or the Learning Lab finished loading / hid). Rebuild the section
-    // list so the content section matches, then either dive into the lessons (if the user just
-    // entered LEARN — _pendingEnterContent) or keep them where they were, silently.
+    // Fingerprint (count + order-independent name hash) of the play-area's active interactive elements.
+    // The game populates this screen ASYNCHRONOUSLY after its data loads: on a cold start the rank hex
+    // (and a mode's content) can appear a few frames AFTER OnEnter first builds the nav, so a one-shot
+    // discovery finds only PLAY — the reported "first load misses the rank, but deck→home reads it
+    // fine". Folding this into ContentSig makes the per-tick poll notice the new content and rebuild,
+    // matching how the game itself fills the screen in. The same mechanism will cover Casual's async
+    // content when that's built. The format-hex carousel isn't a Selectable, so it doesn't churn this.
+    private string MainContentFingerprint()
+    {
+        if (_controller == null) return "";
+        int count = 0, hash = 0;
+        void Acc(Component? root)
+        {
+            if (root == null) return;
+            foreach (var s in root.GetComponentsInChildren<Selectable>(includeInactive: false))
+                if ((s is Button || s is Toggle) && s.isActiveAndEnabled)
+                {
+                    count++;
+                    hash ^= s.gameObject.name.GetHashCode();
+                }
+        }
+        Acc(_controller);
+        Acc(ReadField<HUBGameModeController>(_controller, "gameModeController"));
+        return count + ":" + hash;
+    }
+
+    // The selected mode's content section exists AND matches the selected mode — not a transient
+    // mid-transition state. LEARN's real content is the lessons list (IsShowing == true); every other
+    // mode requires the lessons to have fully torn down first (IsShowing == false). Because IsShowing
+    // lags the synchronous gameplayType flip, gating non-LEARN dives on !IsShowing is what stops us
+    // diving into the still-present Learn Lab when switching away from it (the stale-speech bug). Used
+    // by both the Enter-on-tab dive and the async content-ready dive, so both wait for the same point.
+    private bool ContentSectionReady()
+    {
+        if (_mainGroupIndex < 0 || _mainGroupIndex >= _groups.Count) return false;
+        return LearnModeSelected ? LearningLabSection.IsShowing : !LearningLabSection.IsShowing;
+    }
+
+    // The content signature changed — one frame of an async mode switch (panel animating out/in) or a
+    // tab swap or the Learning Lab loading/hiding. Rebuild so the section list matches the live UI, but
+    // keep the user where they are SILENTLY. We deliberately do NOT dive here: a transition emits many
+    // intermediate signatures, and diving on any of them lands on a half-built state (the casual
+    // carousel with only its info button realized, or the old mode's leftover content). TryCompleteDive
+    // — called from Tick once the signature has stopped changing AND the animation has settled — owns
+    // the dive. _pendingEnterContent survives these intermediate rebuilds (only TryCompleteDive or an
+    // explicit Tab/arrow consumes it), so the dive isn't dropped mid-transition.
     private void OnContentChanged()
     {
         int prev = _activeGroup;
         RebuildGroups();
         if (_groups.Count == 0) { _activeGroup = -1; return; }
         _activeGroup = Mathf.Clamp(prev < 0 ? PickDefaultGroup() : prev, 0, _groups.Count - 1);
-
-        if (_pendingEnterContent && LearningLabSection.IsShowing && _mainGroupIndex >= 0 && _mainGroupIndex < _groups.Count)
-        {
-            _pendingEnterContent = false;
-            _activeGroup = _mainGroupIndex;
-            _groups[_activeGroup].FocusFirstRow(announce: true, interruptPrior: true);
-            return;
-        }
-        // Don't clear _pendingEnterContent here: an Enter-on-LEARN sees an intermediate rebuild
-        // (LEARN selected, list not yet loaded) before the list appears; clearing now would drop
-        // the dive. Any explicit navigation (Tab / arrows) clears it instead.
         if (_activeGroup == _tabGroupIndex) FocusActiveTab(announce: false);
         else _groups[_activeGroup].RefocusCurrent(announce: false);
     }
 
+    // Finish a pending Enter-on-tab / Down-into-content dive — but only once BOTH native signals say
+    // the new mode is fully in: its content section is present and matches the mode (ContentSectionReady)
+    // AND the mode-switch animation has settled (TransitionSettled). Called each tick while the content
+    // signature is stable, so the dive lands on the final content, never a transient. Returns true when
+    // it dove.
+    private bool TryCompleteDive()
+    {
+        if (!_pendingEnterContent || !ContentSectionReady() || !TransitionSettled()) return false;
+        if (_mainGroupIndex < 0 || _mainGroupIndex >= _groups.Count) return false;
+        _pendingEnterContent = false;
+        _activeGroup = _mainGroupIndex;
+        _groups[_activeGroup].FocusFirstRow(announce: true, interruptPrior: true);
+        return true;
+    }
+
+    // The mode-switch animation has finished. Each gameplay type has its own animator
+    // (HUBGameModeController.gameplayTypeAnimators[mode]); switching plays the "PlayMode_In" state on the
+    // newly-current one, and the game itself waits on exactly this (DelayLearningLabUpdate) before
+    // finishing its own setup. So the content isn't stable — old panel still hiding, new panel still
+    // sliding in, carousel hexes still realizing — until the current animator leaves PlayMode_In (and
+    // any blend into it). Reflected from the live controller so it always reflects the current switch.
+    private bool TransitionSettled()
+    {
+        var gmc = _controller != null ? ReadField<HUBGameModeController>(_controller, "gameModeController") : null;
+        if (gmc == null) return true;
+        var animator = ReadField<Animator>(gmc, "currentGameplayTypeAnimator");
+        if (animator == null || !animator.isActiveAndEnabled) return true;
+        var st = animator.GetCurrentAnimatorStateInfo(0);
+        return !st.IsName("PlayMode_In") && !animator.IsInTransition(0);
+    }
+
     // Focus the currently-selected game-mode tab (the toggle that's on), so escaping up into the
     // tab strip — or rebuilding after a switch — lands on the active mode rather than the first tab.
-    private void FocusActiveTab(bool announce)
+    private void FocusActiveTab(bool announce, bool interruptPrior = true)
     {
         if (_tabGroupIndex < 0 || _tabGroupIndex >= _groups.Count) return;
-        if (_groups[_tabGroupIndex] is not KeyboardNavigator kn) { _groups[_tabGroupIndex].FocusFirst(announce); return; }
+        if (_groups[_tabGroupIndex] is not KeyboardNavigator kn) { _groups[_tabGroupIndex].FocusFirst(announce, interruptPrior); return; }
         for (int i = 0; i < kn.Items.Count; i++)
-            if (kn.Items[i] is Toggle t && t.isOn) { kn.FocusIndex(i, announce: announce, interrupt: true); return; }
-        kn.FocusFirst(announce);
+            if (kn.Items[i] is Toggle t && t.isOn) { kn.FocusIndex(i, announce: announce, interrupt: interruptPrior); return; }
+        kn.FocusFirst(announce, interruptPrior);
     }
 
     // The Learning Lab section, at its top level, hands "back" up to the game-mode tabs.
     private void EscapeFromLearningLabToTabs()
+    {
+        if (_tabGroupIndex < 0 || _tabGroupIndex >= _groups.Count) return;
+        _activeGroup = _tabGroupIndex;
+        FocusActiveTab(announce: true);
+    }
+
+    // The Build & Battle section hands Escape/Backspace back up to the game-mode tabs.
+    private void EscapeFromBnbToTabs()
     {
         if (_tabGroupIndex < 0 || _tabGroupIndex >= _groups.Count) return;
         _activeGroup = _tabGroupIndex;
@@ -564,10 +682,14 @@ internal sealed class HUBHomeScreen : IScreenHandler
     }
 
     private void AddGroup(List<Selectable> items, KeyboardNavigator.LabelResolver? resolver = null,
-                          bool radioMode = false, string? groupName = null)
+                          bool radioMode = false, string? groupName = null, bool flatHorizontal = false)
     {
         var g = new KeyboardNavigator(_router.Speech) { AllowTab = false, RadioToggleMode = radioMode, GroupName = groupName };
         g.SetItems(items, resolver);
+        // A row of controls that aren't perfectly Y-aligned (the casual format carousel) would
+        // auto-detect as a 1-column list and strand Left/Right; force a flat horizontal strip so every
+        // item is reachable. Up/Down still escape to the adjacent section (handled in Tick).
+        if (flatHorizontal) g.ForceFlatHorizontal();
         // Escape on any flat HOME section opens the overflow (⋮) menu — the same affordance a
         // sighted player gets from the top-bar button. The Learning Lab section (added separately,
         // not via AddGroup) keeps Escape for drilling back out of the lessons.
@@ -576,6 +698,25 @@ internal sealed class HUBHomeScreen : IScreenHandler
         var names = string.Join(", ", items.Take(20).Select(s => s != null ? s.gameObject.name : "<null>"));
         var extra = items.Count > 20 ? $" (+{items.Count - 20} more)" : string.Empty;
         Log.Info($"Home group {_groups.Count}: {items.Count} items — {names}{extra}");
+    }
+
+    // The carousel rotation arrows (ArrowButtonLeft / ArrowButtonRight) — redundant for us, since the
+    // format hexes are directly selectable, so we drop them from the casual content.
+    private static bool IsCarouselArrow(Selectable s)
+        => s.gameObject.name.IndexOf("Arrow", System.StringComparison.OrdinalIgnoreCase) >= 0;
+
+    // Casual format-carousel labels: the info ⓘ reads as the casual mode info; each format hex
+    // (Standard / Expanded / Custom) reads its name + ", selected" when it's the active format
+    // (its carousel element's GameMode == the current game mode).
+    private static string CasualLabel(Selectable s)
+    {
+        if (s.gameObject.name.IndexOf("Info", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            return "Casual mode information";
+        var label = KeyboardNavigator.ResolveBaseLabel(s);
+        var elem = s.GetComponentInParent<MenuCarouselElementUi>();
+        if (elem != null && elem.GameMode == HUBGameModeController.gameMode)
+            label += ", selected";
+        return label;
     }
 
     // Tab label: localized tab name + selected-state ("Ranked, selected" / "Casual, not
