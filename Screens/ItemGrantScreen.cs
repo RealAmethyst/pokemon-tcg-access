@@ -249,7 +249,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
         {
             _lines = CardText.DetailLines(row);
             var prefix = (granted != null && granted.isNewCard) ? "New, " : "";
-            _router.Speech.Say(prefix + CardText.NameWithType(row), interrupt);
+            _router.Speech.Say(prefix + CardText.NameTypeRarity(row), interrupt);
         }
         else
         {
@@ -313,7 +313,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
         {
             _lines = CardText.DetailLines(row);
             var prefix = (granted != null && granted.isNewCard) ? "New, " : "";
-            _router.Speech.Say($"{prefix}{CardText.NameWithType(row)}, {index + 1} of {booster.numberOfCards}", interrupt);
+            _router.Speech.Say($"{prefix}{CardText.NameTypeRarity(row)}, {index + 1} of {booster.numberOfCards}", interrupt);
         }
         else _router.Speech.Say(string.IsNullOrEmpty(clientId) ? "Card" : clientId!, interrupt);
     }

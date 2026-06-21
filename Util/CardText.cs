@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using CardDatabase.DataAccess;
+using TPCI.Localization;
 
 namespace PokemonTCGLiveAccessibility.Util;
 
@@ -18,6 +20,110 @@ internal static class CardText
         if (string.IsNullOrEmpty(name)) name = "card";
         var type = TypeLabel(row);
         return type.Length > 0 ? $"{name}, {type}" : name;
+    }
+
+    // The card's rarity name (e.g. "Common", "Double Rare", "Reverse Holo Rare") from its loc code.
+    // Ownership and deck legality are per-rarity (a card's variants are distinct CardIDs with separate
+    // owned counts), so the deck editor speaks this after the type so a player can tell which printing
+    // they're on. Null when the card has no rarity / the loc key is missing (we never speak a raw code).
+    //
+    // Rarity names live under the same "tcg_" loc family the Card Dex uses for set/series names
+    // (CardDexSeriesSelector: SetTextByID("tcg_" + seriesId)). The key is "tcg_rarity_" + the card's
+    // Loc Rarity Code — the bare code ("rr", "r_ph", "2r-c") is NOT a loc key on its own (that was the
+    // "version 1, version 2…" bug). Some data may store the full id, so we try it raw as a fallback.
+    public static string? RarityName(ICardDataRow? row)
+    {
+        try
+        {
+            var code = row?.Rarity?.LocRarityCode;
+            if (string.IsNullOrWhiteSpace(code)) return null;
+            code = code!.Trim();
+            var keys = code.StartsWith("tcg_")
+                ? new[] { code }
+                : new[] { "tcg_rarity_" + code.ToLowerInvariant(), code };
+            foreach (var k in keys)
+            {
+                var s = LocalizationManager.Instance?.GetString(k);
+                if (string.IsNullOrWhiteSpace(s) || s!.Contains("(Missing)")) continue;
+                var clean = StripFormatting(s);
+                if (clean.Length > 0) return clean;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // Some loc strings are format/decorated, e.g. the rarity name "{0} Common" (the {0} is the game's
+    // rarity-symbol sprite slot, filled at render time). Drop format placeholders and any rich-text/
+    // sprite tags and collapse whitespace so speech says the words only ("Common", not "{0} Common").
+    private static string StripFormatting(string s)
+    {
+        s = Regex.Replace(s, @"\{\d+\}", " ");   // {0}, {1}, …
+        s = Regex.Replace(s, @"<[^>]+>", " ");   // <sprite=…>, <color=…>, etc.
+        return Regex.Replace(s, @"\s+", " ").Trim();
+    }
+
+    // The card's expansion/set name — what tells apart two printings that share a rarity AND treatment
+    // but come from different sets (the same card reprinted). Friendly localized name via the same "tcg_"
+    // loc family the Card Dex uses for series/set names ("tcg_" + set code, e.g. tcg_swsh1). Falls back
+    // to the raw set code the game itself prints on the card stub (CardStubParts: CardSetID + number),
+    // which is still a fine disambiguator. Null when the card has no set id.
+    public static string? SetName(ICardDataRow? row)
+    {
+        try
+        {
+            var code = row?.CardSetID;
+            if (string.IsNullOrWhiteSpace(code)) return null;
+            code = code!.Trim();
+            var s = LocalizationManager.Instance?.GetString("tcg_" + code.ToLowerInvariant());
+            if (!string.IsNullOrWhiteSpace(s) && !s!.Contains("(Missing)"))
+            {
+                var clean = StripFormatting(s!);
+                if (clean.Length > 0) return clean;
+            }
+            return code;   // raw set code (e.g. "MEG") — what the game shows on the stub
+        }
+        catch { }
+        return null;
+    }
+
+    // The card's foil / print TREATMENT — what tells same-rarity printings of a card apart (e.g. two
+    // "Common" Bulbasaur = normal vs reverse holo). Read from the variant flags (CardDataRow.CardVariant
+    // = the "variant" column). Supplied in English: there's no loc key for these treatments, same as the
+    // game-fundamental wording already in this file. Null for a standard (non-foil-variant) printing.
+    public static string? VariantName(ICardDataRow? row)
+    {
+        if (row == null) return null;
+        try
+        {
+            var v = row.CardVariant;
+            if (v.HasFlag(CardVariant.MasterBallParallelHolo)) return "Master Ball pattern";
+            if (v.HasFlag(CardVariant.PokeBallParallelHolo)) return "Poké Ball pattern";
+            if (v.HasFlag(CardVariant.ParallelHolo)) return "reverse holo";
+            if (v.HasFlag(CardVariant.Alternate)) return "alternate art";
+        }
+        catch { }
+        return null;
+    }
+
+    // "Common" / "Common, reverse holo" / "Illustration Rare, Poké Ball pattern" — rarity plus the
+    // print treatment, so two printings that share a rarity name are still distinguishable. Falls back
+    // to the treatment alone when the rarity loc is missing; null when neither resolves.
+    public static string? RarityWithVariant(ICardDataRow? row)
+    {
+        var rarity = RarityName(row);
+        var variant = VariantName(row);
+        if (string.IsNullOrEmpty(rarity)) return variant;
+        return string.IsNullOrEmpty(variant) ? rarity : $"{rarity}, {variant}";
+    }
+
+    // "Charizard ex, Stage 2 Pokémon, Double Rare" — name+type plus rarity/variant. Used where a card is
+    // revealed (pack openings, reward grants) so the player hears exactly which printing they pulled.
+    public static string NameTypeRarity(CardDataRow row)
+    {
+        var s = NameWithType(row);
+        var rv = RarityWithVariant(row);
+        return string.IsNullOrEmpty(rv) ? s : $"{s}, {rv}";
     }
 
     // Lines walked with Down / Up after the name: Pokémon stats first, then each attack / ability

@@ -86,10 +86,28 @@ internal sealed class DeckValidityOverlayScreen : IScreenHandler
     {
         if (_overlay == null || !_overlay.gameObject.activeInHierarchy) return;
 
-        var buttons = _overlay.GetComponentsInChildren<Button>(includeInactive: false)
-            .Where(b => b.isActiveAndEnabled)
-            .OrderBy(b => ReadingOrder(b.transform))
-            .Cast<Selectable>().ToList();
+        // The popup's prefab carries up to three buttons — a left Cancel/Close, the red Exit, and a
+        // redundant corner close — and the greyed one stays active-but-not-interactable. A blind
+        // player heard all three (one dead, plus "close" and "cancel" doing the same thing). Surface
+        // only the game's two CANONICAL actions, each only when usable: the left button (Cancel/Close,
+        // text driven by leftCancelCloseLocText) and the red exitButton (Exit-anyway, shown only on
+        // exit-with-errors). Escape still cancels via OnBack, so a lone dismiss is never stranded.
+        var buttons = new List<Selectable>();
+        var leftBtn = ReadField<LocText>(_overlay, "leftCancelCloseLocText")?.GetComponentInParent<Button>();
+        var exitBtn = ReadField<Button>(_overlay, "exitButton");
+        void TryAdd(Button? b) { if (b != null && b.isActiveAndEnabled && b.interactable && !buttons.Contains(b)) buttons.Add(b); }
+        TryAdd(leftBtn);
+        TryAdd(exitBtn);
+
+        if (buttons.Count == 0)
+        {
+            // Fallback if the game renames those fields: any interactable button, deduped by label.
+            var seen = new HashSet<string>();
+            foreach (var b in _overlay.GetComponentsInChildren<Button>(includeInactive: false)
+                         .Where(b => b.isActiveAndEnabled && b.interactable)
+                         .OrderBy(b => ReadingOrder(b.transform)))
+                if (seen.Add(KeyboardNavigator.ResolveBaseLabel(b))) buttons.Add(b);
+        }
         _nav.SetItems(buttons);
         _nav.AllowHorizontal = true;
         if (!announce) return;

@@ -583,6 +583,12 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     // (TotalOwnedQuantity counts every printing of the card). A card you don't own at all reads "not
     // owned"; a deck that uses more copies than you own (legal to build, but you can't play it ranked)
     // reads "you don't own enough" — the missing flag the player couldn't see.
+    //
+    // Ownership is PER VERSION (a card's rarities are distinct CardIDs with separate owned counts), so
+    // the archetype totals can BOTH look fine yet the deck still be invalid — e.g. you own 1 Budew of
+    // each of two rarities (2 owned) and put 2 of the SAME rarity in the deck (2 in deck): totals match,
+    // but that one version is over-allocated. HasUnownedVersionInDeck catches that hidden case (the open
+    // a card's Versions section in the card-detail overlay to see which rarity to swap to).
     private string CardLabel(ArchetypeDBCards stack)
     {
         var card = PreferredCard(stack);
@@ -599,6 +605,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         {
             parts.Add($"{owned} owned");
             if (inDeck > owned) parts.Add("you don't own enough");
+            else if (HasUnownedVersionInDeck(stack)) parts.Add("you don't own enough of one version");
         }
         return string.Join(", ", parts);
     }
@@ -606,6 +613,23 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private static int SafeOwned(ArchetypeDBCards stack)
     {
         try { return stack.TotalOwnedQuantity(); } catch { return 0; }
+    }
+
+    // True when any single rarity version in the deck uses more copies than you own of THAT exact
+    // version — the per-CardID check the game's validator runs, which archetype totals can mask.
+    private static bool HasUnownedVersionInDeck(ArchetypeDBCards stack)
+    {
+        try
+        {
+            foreach (var c in stack.Cards)
+            {
+                if (c == null) continue;
+                int inDeck = stack.TotalDeckQuantityForSpecificCard(c.CardID);
+                if (inDeck > 0 && stack.TotalOwnedQuantityForSpecificCard(c.CardID) < inDeck) return true;
+            }
+        }
+        catch { }
+        return false;
     }
 
     private static ICardDataRow? PreferredCard(ArchetypeDBCards stack)
