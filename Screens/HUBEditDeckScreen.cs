@@ -13,6 +13,7 @@ using TPCI.Rainier.Features.DeckEditor;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
+using _Rainier.Scripts.UI.FrontEnd;
 using CardCategory = TPCI.Rainier.CardCategory;
 
 namespace PokemonTCGLiveAccessibility.Screens;
@@ -73,6 +74,11 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private KeyboardNavigator? _tabsNav;
     private GlobalCategorySelector? _categorySelector;
     private CardCategory _lastCategory = (CardCategory)(-1);
+
+    // The bulk "Exchange all unowned" button (CraftUnownedCardsButtonController), surfaced in the Top
+    // section only while visible; cached each RebuildSections so TopLabel can give it a real label.
+    private Button? _exchangeButton;
+    private string _exchangeLabel = "Exchange all unowned";
 
     // Section names sourced from the game's own headers (loc IDs deck_card_library / deck_deck —
     // the "CARD LIBRARY" banner and the deck panel). Announced when you Tab into a card group so
@@ -164,6 +170,8 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             harmony.Patch(deactivate, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBEditDeckScreen), nameof(Deactivate_Postfix))));
 
         AddCardOverlayScreen.Install(harmony, router);
+        // The per-card craft popup the card detail's Craft button opens (also reused by the Card Dex).
+        CraftCardOverlayScreen.Install(harmony, router);
         // 1.5.0 deck-editor overlays (open over the editor; silent without their own handlers).
         DeckStatsOverlayScreen.Install(harmony, router);
         CraftAllConfirmOverlayScreen.Install(harmony, router);
@@ -309,11 +317,14 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             return;
         }
 
-        // Escape / Backspace: cancel a hold first; otherwise back out of the editor (to DECKS).
+        // Escape / Backspace: cancel a hold first. During an FTUE card step the editor is sealed (the
+        // game blocks Back behind its input blocker), so leaving would strand the tutorial on a drop
+        // that can never come — instead re-state the objective. Otherwise back out of the editor (to DECKS).
         if (UnityEngine.Input.GetKeyDown(KeyCode.Escape) ||
             (UnityEngine.Input.GetKeyDown(KeyCode.Backspace) && !IsTextInputFocused()))
         {
             if (_holding) { CancelHold(announce: true); return; }
+            if (FtueCardStep) { ReAnnounceFtueCardStep(); return; }
             DoBack();
             return;
         }
@@ -357,10 +368,13 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             .Where(b => b.isActiveAndEnabled)
             .Where(b => b.GetComponentInParent<CardStubParts>() == null)
             .Where(b => !toggleSet.Contains(b))
-            .OrderBy(s => ReadingOrder(s.transform))
             .Cast<Selectable>().ToList();
+        // The bulk "Exchange all unowned" button isn't a controller child and only shows when the deck
+        // has unowned craftable cards — add it explicitly when visible (re-run every RebuildSections).
+        DiscoverExchangeButton(topButtons);
+        topButtons.Sort((a, b) => ReadingOrder(a.transform).CompareTo(ReadingOrder(b.transform)));
         _topNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
-        _topNav.SetItems(topButtons);
+        _topNav.SetItems(topButtons, TopLabel);
         // These buttons are scattered across the top bar AND the right deck panel, so auto-axis
         // detection strands one cluster (only the first few were reachable). Force a flat Up/Down list
         // so every option is reachable in reading order. See [[feedback_auto_detect_axes]].
@@ -378,6 +392,53 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
         RefreshDeck();
         RefreshLibraryCount();
+    }
+
+    // Locate the "Exchange all unowned" button (CraftUnownedCardsButtonController, not a serialized
+    // child of the deck controller) and, when its content is showing, add its real Button to the Top
+    // "Deck options" list. Activating it routes to AttemptCraftingPurchase → CraftAllConfirmOverlay
+    // (handled by CraftAllConfirmOverlayScreen) or the insufficient-funds error (ErrorOverlayScreen).
+    private void DiscoverExchangeButton(List<Selectable> topButtons)
+    {
+        _exchangeButton = null;
+        try
+        {
+            var ctrl = UnityEngine.Object.FindFirstObjectByType<CraftUnownedCardsButtonController>();
+            if (ctrl == null) return;
+            var lpb = AccessTools.Field(typeof(CraftUnownedCardsButtonController), "purchaseButton")?.GetValue(ctrl) as LabeledPurchaseButton;
+            if (lpb == null) return;
+            var btn = AccessTools.Field(typeof(LabeledPurchaseButton), "button")?.GetValue(lpb) as Button;
+            if (btn == null) return;
+            var content = AccessTools.Field(typeof(LabeledPurchaseButton), "buttonContent")?.GetValue(lpb) as GameObject;
+            bool visible = content != null ? content.activeInHierarchy : btn.gameObject.activeInHierarchy;
+            if (!visible) return;
+            _exchangeButton = btn;
+            _exchangeLabel = ExchangeLabelFrom(lpb);
+            if (!topButtons.Contains(btn)) topButtons.Add(btn);
+        }
+        catch { }
+    }
+
+    // "Exchange all unowned, 1500 Credits" — the button's own label text + cost, both read off the
+    // LabeledPurchaseButton so they match the screen (and the localized currency name).
+    private static string ExchangeLabelFrom(LabeledPurchaseButton lpb)
+    {
+        string label = "Exchange all unowned", cost = string.Empty;
+        try
+        {
+            var bl = AccessTools.Field(typeof(LabeledPurchaseButton), "buttonLabel")?.GetValue(lpb) as TMPro.TMP_Text;
+            var cl = AccessTools.Field(typeof(LabeledPurchaseButton), "costLabel")?.GetValue(lpb) as TMPro.TMP_Text;
+            if (bl != null && !string.IsNullOrWhiteSpace(bl.text)) label = bl.text.Trim();
+            if (cl != null && !string.IsNullOrWhiteSpace(cl.text)) cost = cl.text.Trim();
+        }
+        catch { }
+        return string.IsNullOrEmpty(cost) ? label : $"{label}, {cost} {Loc("currency_tc", "Credits")}";
+    }
+
+    private string TopLabel(Selectable s)
+    {
+        if (_exchangeButton != null && ReferenceEquals(s, _exchangeButton)) return _exchangeLabel;
+        return KeyboardNavigator.DefaultLabel(s);
     }
 
     // The drawer's filtered collection finished (re)loading — initial open, category switch, search
@@ -407,8 +468,11 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private void CycleSection(int dir)
     {
         // While holding a card, only cycle the groups you can place it into (Deck / Library) — Tab
-        // shouldn't wander to the Top bar or Category tabs mid-drag.
-        var order = _holding
+        // shouldn't wander to the Top bar or Category tabs mid-drag. Same restriction during an FTUE
+        // card step: the game seals everything but the target card + the deck drop behind its blocker,
+        // so reaching the Top bar (and its Back/Home button) would be an off-script way out of a sealed
+        // tutorial. Confining Tab to Deck/Library keeps the only legal moves: pick up, then place.
+        var order = (_holding || FtueCardStep)
             ? new[] { Section.Deck, Section.Library }
             : new[] { Section.Top, Section.Tabs, Section.Deck, Section.Library };
         int cur = Array.IndexOf(order, _section);
@@ -488,7 +552,11 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow)) { if (ftueLocked) ReadCard(kind, interrupt: true); else MoveCard(kind, -1); return; }
         if (UnityEngine.Input.GetKeyDown(KeyCode.DownArrow)) { ReadLine(+1); return; }
         if (UnityEngine.Input.GetKeyDown(KeyCode.UpArrow)) { ReadLine(-1); return; }
-        if (UnityEngine.Input.GetKeyDown(KeyCode.I)) { Inspect(kind); return; }
+        // I opens the card-detail overlay — but NOT during an FTUE card step: the game clears the card's
+        // click delegate there (a sighted player can't open it), and the overlay's +/− would AddCard
+        // WITHOUT firing the tutorial's drop advance, desyncing the FTUE. Re-read the card instead; its
+        // full detail is still available via Down/Up.
+        if (UnityEngine.Input.GetKeyDown(KeyCode.I)) { if (FtueCardStep) ReadCard(kind, interrupt: true); else Inspect(kind); return; }
         if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter))
         {
             if (_holding) TryPlace(kind);
@@ -676,7 +744,13 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         _heldName = stack.LocalizedCardName();
         _holding = true;
         HUBEditDeckController.IsEditorDragging = true;   // match the game's drag state
-        Say($"Holding {_heldName}", interrupt: true);
+        // During the tutorial the game shows a drag-to-deck hand animation after you grab the card; name
+        // the objective as its spoken equivalent (a coached FTUE objective, not a control hint) so a
+        // first-time keyboard user knows where the held card needs to go.
+        if (FtueCardStep)
+            Say($"Holding {_heldName}. Now place it {(_heldAction == CardEditorDrag.CardDropAction.Add ? "in your deck" : "in your collection")}.", interrupt: true);
+        else
+            Say($"Holding {_heldName}", interrupt: true);
     }
 
     private void TryPlace(Kind destination)
@@ -700,10 +774,16 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         bool ftue = FTUEHook.FtueIsRunning;
         if (card == null) { CancelHold(announce: true); return; }
 
-        if (action == CardEditorDrag.CardDropAction.Add &&
-            !_controller!.CanAddCard(card, DeckEditorGameMode.CurrentGameMode))
+        bool canAdd = action != CardEditorDrag.CardDropAction.Add
+            || _controller!.CanAddCard(card, DeckEditorGameMode.CurrentGameMode);
+
+        // The game's own gate said no (deck full / copy limit / not owned). Outside the tutorial, report
+        // and stop — the deck didn't change. During the tutorial we must NOT stop here: the game's
+        // DeckEditorCardDropTarget.OnDrop fires ftueDrop() (the advance) even when CanAddCard is false,
+        // so the drop GESTURE advances the FTUE regardless of whether the copy was legal. Bailing out
+        // would leave the sealed tutorial (Back is blocked) waiting on an advance that never comes.
+        if (!canAdd && !ftue)
         {
-            // The game's own gate said no (deck full / copy limit / not owned). Report and stop.
             ClearHold();
             _section = from;
             Say($"Can't add {name} right now{FullDeckHint()}", interrupt: true);
@@ -711,20 +791,26 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             return;
         }
 
-        // The drop's real action — DeckEditorCardDropTarget.OnDrop calls exactly this.
-        if (action == CardEditorDrag.CardDropAction.Add) _controller!.AddCard(card, focusOnAddedCard: true);
+        // The drop's real action — DeckEditorCardDropTarget.OnDrop calls exactly this (and only when the
+        // add is legal; an illegal add during the tutorial advances without changing the deck, as above).
+        if (action == CardEditorDrag.CardDropAction.Add) { if (canAdd) _controller!.AddCard(card, focusOnAddedCard: true); }
         else _controller!.RemoveCard(card);
 
         // During the tutorial, fire the same ftueDrop the drop would have fired, so the FTUE advances.
         if (ftue) CompleteFtueDrop();
 
         ClearHold();
-        RefreshDeck();
-        RefreshLibraryCount();
+        // Full rebuild (not just the counts) so the Top "Deck options" section picks up the bulk
+        // Exchange-all button appearing/disappearing as the deck's unowned set changes.
+        RebuildSections();
 
         _section = from;
-        var verb = action == CardEditorDrag.CardDropAction.Add ? "Added" : "Removed";
-        Say($"{verb} {name}{NewCountMessage(name)}", interrupt: true);
+        if (!canAdd) Say($"Couldn't add {name}{FullDeckHint()}", interrupt: true);
+        else
+        {
+            var verb = action == CardEditorDrag.CardDropAction.Add ? "Added" : "Removed";
+            Say($"{verb} {name}{NewCountMessage(name)}", interrupt: true);
+        }
         ReAnnounceCurrent(interrupt: false);
     }
 
@@ -794,6 +880,38 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     // reparented under a Blocker so we can't walk to its CardStubParts, but the indicator carries the
     // card id + element type. Announce what to do and jump the cursor onto that card so the user can
     // just press Enter to pick it up; completing the action advances the FTUE via CompleteFtueDrop.
+
+    // True while the FTUE is driving a deck-editor CARD step (add/remove a specific card). In LANDSCAPE
+    // the game seals the editor: UseLibraryCardStub clears the card's click delegate and reparents
+    // everything except the target behind the input blocker, so a sighted player CANNOT press Back/Home,
+    // open card details, or touch any other card — the ONLY way forward is to drag the target onto the
+    // deck (which fires the advance). A keyboard user has three off-script escapes the blocker denies
+    // them: Escape→exit, Tab→Top→Back button, and I→card-detail overlay (whose +/− would AddCard without
+    // firing the drop advance, desyncing the FTUE). The reported stuck bug was exactly this: a user
+    // backed out of the editor here with the card never added, leaving the FTUE waiting on a drop that
+    // could no longer happen. So while this is true we restrict Tab to Deck/Library, block the editor
+    // exit, and block the overlay — matching the game's blocker so the step stays completable but can't
+    // be abandoned.
+    private static bool FtueCardStep =>
+        FTUEHook.FtueIsRunning && !string.IsNullOrEmpty(FTUEHook.DeckEditorFtueCardId);
+
+    // Re-state the FTUE card-step objective — used when the user presses Escape during it. They can't
+    // leave (the game wouldn't let them either), so instead of silently eating the key we remind them
+    // what the tutorial wants, then re-read the card the cursor is on.
+    private void ReAnnounceFtueCardStep()
+    {
+        var verb = FtueVerb(FTUEHook.DeckEditorFtueElement ?? "");
+        if (!string.IsNullOrEmpty(_ftueCardLock)) Say($"Tutorial: {verb} this card", interrupt: true);
+        else
+        {
+            var cardId = FTUEHook.DeckEditorFtueCardId;
+            var row = !string.IsNullOrEmpty(cardId) ? ManagerSingleton<CardDatabaseManager>.instance.TryGetCardFromDatabase(cardId) : null;
+            var name = row != null ? row.LocalizedCardName : (cardId ?? "the highlighted card");
+            Say($"Tutorial: {verb} {name}", interrupt: true);
+        }
+        ReAnnounceCurrent(interrupt: false);
+    }
+
     private void UpdateFtueGuidance()
     {
         if (!FTUEHook.FtueIsRunning) { _lastFtueCardId = string.Empty; _ftueCardLock = string.Empty; ClearFtueFocus(); return; }

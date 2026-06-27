@@ -7,6 +7,7 @@ using CardDatabase.DataAccess;
 using HarmonyLib;
 using MatchLogic;
 using PokemonTCGLiveAccessibility.Util;
+using TPCI.Localization;
 using TPCI.Rainier.Features.DeckEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -25,9 +26,14 @@ namespace PokemonTCGLiveAccessibility.Screens;
 // the one actually in the deck. (The game's own rarity bar uses the per-card numbers too —
 // AddCardOverlayManager.SetupRarityInfoBar → RelativeDeckQuantityForSpecificCard.)
 //
-// Three sections, Up/Down to move between them (only the ones that apply are present):
-//   • Card     — the selected version: "name, type, rarity, N in deck, owned / not owned".
+// Up/Down move between sections (only the ones that apply are present):
+//   • Card     — the selected version: "name, type, rarity, N in deck, owned / not owned, exchangeable".
 //                Left/Right browse other cards; +/− add/remove THIS version.
+//   • Exchange — the game's "EXCHANGE" button (its code calls it Craft/CraftOpen). Present whenever
+//                that button is on screen. Reads "Exchange, N available"; Enter opens the quantity/cost
+//                popup (PurchaseCardButtonActions → CraftCardOverlayScreen) — the exact button a
+//                sighted player clicks. An unowned card with no exchange option has no Exchange
+//                section; its reason is appended to the Card line instead.
 //   • Versions — one entry per rarity printing, read straight off the game's RarityDrawerParts
 //                buttons: "rarity, N owned, M in deck, [not owned], [selected]". Enter picks it
 //                (switches what +/− adds), exactly like clicking the rarity stack. Present only
@@ -40,9 +46,13 @@ namespace PokemonTCGLiveAccessibility.Screens;
 // (= SelectedAlternateRarity). Activates off the overlay's Setup, pops on its OnDeActivate.
 internal sealed class AddCardOverlayScreen : IScreenHandler
 {
-    private enum Section { Card, Versions, Details }
+    private enum Section { Card, Craft, Versions, Details }
 
     private static AddCardOverlayScreen? _instance;
+
+    // True while the deck-editor card detail is open — lets CraftCardOverlayScreen gate its "Crafted"
+    // hand-off to this context (the same popup is reused by the Card Dex, which has no card detail here).
+    public static bool IsOpen => _instance != null && _instance._active;
 
     private readonly ScreenRouter _router;
     private AddCardOverlayManager? _overlay;
@@ -63,6 +73,12 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     private static readonly FieldInfo? RarityDrawerField = AccessTools.Field(typeof(AddCardOverlayManager), "rarityDrawerParts");
     private static readonly FieldInfo? RarityInstancesField = AccessTools.Field(typeof(RarityDrawerParts), "_cardRarityInstances");
     private static readonly FieldInfo? RarityNumActiveField = AccessTools.Field(typeof(RarityDrawerParts), "_numActiveInstances");
+    // The card-detail crafting widgets: the "Craft" button (set active only when the card is
+    // purchasable), the availability count + its label, and the uncraftable-reason message bar.
+    private static readonly FieldInfo? PurchasePartsField = AccessTools.Field(typeof(AddCardOverlayManager), "addCardPurchaseParts");
+    private static readonly FieldInfo? RarityCountTextField = AccessTools.Field(typeof(AddCardOverlayManager), "rarityCountText");
+    private static readonly FieldInfo? RarityCountLabelField = AccessTools.Field(typeof(AddCardOverlayManager), "rarityCountLabel");
+    private static readonly FieldInfo? UncraftableField = AccessTools.Field(typeof(AddCardOverlayManager), "uncraftableIndicator");
 
     public string Name => "Card details";
 
@@ -126,7 +142,19 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
         AnnounceCard(interrupt: false);
     }
 
-    public void OnResume() { ResetToCard(); AnnounceCard(interrupt: true); }
+    public void OnResume()
+    {
+        ResetToCard();
+        // The craft popup just closed. If a craft succeeded, confirm it, then re-read the (now-owned)
+        // card so the new owned count is heard right after.
+        if (CraftCardOverlayScreen.JustCrafted)
+        {
+            CraftCardOverlayScreen.JustCrafted = false;
+            _router.Speech.Say("Exchanged", interrupt: true);
+            AnnounceCard(interrupt: false);
+        }
+        else AnnounceCard(interrupt: true);
+    }
     public void OnExit() { }
     public void RespeakAll() => AnnounceCard(interrupt: false);
 
@@ -180,6 +208,7 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     private List<Section> Sections()
     {
         var list = new List<Section> { Section.Card };
+        if (IsCraftable()) list.Add(Section.Craft);
         if (VersionStacks().Count > 1) list.Add(Section.Versions);
         EnsureLines();
         if (_lines.Count > 0) list.Add(Section.Details);
@@ -204,6 +233,9 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
         {
             case Section.Card:
                 AnnounceCard(interrupt: true);
+                break;
+            case Section.Craft:
+                _router.Speech.Say(CraftLabel(), interrupt: true);
                 break;
             case Section.Versions:
                 ShowVersions();
@@ -234,7 +266,86 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     private void Activate()
     {
         if (_section == Section.Versions) { ChooseVersion(); return; }
+        if (_section == Section.Craft) { OpenCraft(); return; }
         _overlay?.CloseAddCardOverlay();   // Card / Details: Enter closes (Escape does too)
+    }
+
+    // ───────────────────────── Exchange section ─────────────────────────
+    // The game labels this "EXCHANGE" (its code calls it Craft / CraftOpen): the button that opens the
+    // quantity/cost popup. addCardPurchaseParts is the coin/card ICON sitting on that button, so the
+    // real Exchange button is the icon's parent Button.
+
+    private Button? ExchangeButton()
+    {
+        if (_overlay == null) return null;
+        try
+        {
+            if (PurchasePartsField?.GetValue(_overlay) is AddCardPurchaseParts p && p != null)
+                return p.GetComponentInParent<Button>(includeInactive: true);
+        }
+        catch { }
+        return null;
+    }
+
+    // Show the Exchange section whenever that button is on screen — the icon being active (the game's
+    // own "can purchase" signal) OR, failing that, the button itself being visible (a disabled Exchange,
+    // which we then announce as "unavailable", the desktop convention). Hidden exchange UI → no section.
+    private bool IsCraftable()
+    {
+        if (_overlay == null) return false;
+        try { if (PurchasePartsField?.GetValue(_overlay) is AddCardPurchaseParts p && p != null && p.gameObject.activeInHierarchy) return true; }
+        catch { }
+        var b = ExchangeButton();
+        return b != null && b.isActiveAndEnabled;
+    }
+
+    private string CraftLabel()
+    {
+        var avail = AvailabilityText();
+        var label = string.IsNullOrEmpty(avail) ? "Exchange" : $"Exchange, {avail}";
+        var b = ExchangeButton();
+        if (b != null && !b.IsInteractable()) label += ", unavailable";
+        return label;
+    }
+
+    // Open the game's own exchange popup, exactly as clicking the EXCHANGE button does.
+    // CraftCardOverlayScreen activates itself off the popup's ShowPurchasePopup.
+    private void OpenCraft()
+    {
+        if (_overlay == null) return;
+        try { _overlay.PurchaseCardButtonActions(); } catch { }
+    }
+
+    // The game's own on-card availability readout ("3 Available" / "2 Unowned cards") — rarityCountText
+    // is the number, rarityCountLabel the word. Read straight off the LocTexts so it matches the screen.
+    private string? AvailabilityText()
+    {
+        if (_overlay == null) return null;
+        try
+        {
+            var num = (RarityCountTextField?.GetValue(_overlay) as LocText)?.CurrentText;
+            var lbl = (RarityCountLabelField?.GetValue(_overlay) as LocText)?.CurrentText;
+            var s = $"{num} {lbl}".Trim();
+            return string.IsNullOrWhiteSpace(s) ? null : s;
+        }
+        catch { return null; }
+    }
+
+    // The localized reason an unowned card can't be crafted (promo / not-yet-craftable date), read off
+    // the game's uncraftable message bar — only when it's actually showing. Null otherwise.
+    private string? UncraftableReason()
+    {
+        if (_overlay == null) return null;
+        try
+        {
+            var ind = UncraftableField?.GetValue(_overlay) as AnimatedSetActive;
+            if (ind == null || !ind.currentlyVisible) return null;
+            var parts = new List<string>();
+            foreach (var t in ind.GetComponentsInChildren<TMPro.TMP_Text>(includeInactive: false))
+                if (!string.IsNullOrWhiteSpace(t.text)) parts.Add(t.text.Trim());
+            return parts.Count == 0 ? "cannot be crafted" : string.Join(", ", parts);
+        }
+        catch { return null; }
     }
 
     // ───────────────────────── Card section ─────────────────────────
@@ -269,6 +380,9 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
             int other = TotalOwnedAllVersions();
             if (other > 0) sb.Append(", ").Append(other).Append(" owned in other versions");
         }
+        // Flag whether this version can be exchanged (Down to the Exchange section) or, if not, why not.
+        if (IsCraftable()) sb.Append(", exchangeable");
+        else { var reason = UncraftableReason(); if (reason != null) sb.Append(", ").Append(reason); }
         _router.Speech.Say(sb.ToString(), interrupt);
     }
 
