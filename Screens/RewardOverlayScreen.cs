@@ -99,6 +99,14 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         {
             _active = false; _router.Deactivate(this); _controller = null; return;
         }
+        // SECOND stranding mode (post-match reward freeze, from a real log): collecting a reward opens a
+        // nested item-grant reveal OVER this overlay; when that reveal finishes the controller tears down
+        // THIS overlay's reward content (its COLLECT button + slots) but does NOT fire CloseScreen or
+        // deactivate the GameObject — so we resume onto an overlay that's still active + the current
+        // overlay yet has nothing left to read or press (log: "Screen resume: Rewards" then dead silence,
+        // and no "RewardOverlay:" line = empty title). A live reward overlay always rebuilt at least one
+        // button (COLLECT / close); zero after a Rebuild means it's spent — let go so Home resumes.
+        if (_nav.Count == 0) { _active = false; _router.Deactivate(this); _controller = null; return; }
         _nav.Tick();
     }
 
