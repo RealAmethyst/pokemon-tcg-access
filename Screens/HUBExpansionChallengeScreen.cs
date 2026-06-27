@@ -694,6 +694,9 @@ internal sealed class HUBExpansionChallengeScreen : IScreenHandler
 
     private static string StripTags(string s)
     {
+        // Energy / card-property symbols (e.g. a daily quest's "{G} Energy") render as TMP sprite tags;
+        // speak them as words BEFORE the tag strip below would silently delete them.
+        s = CardText.SpeakIcons(s);
         if (s.IndexOf('<') < 0) return s;
         var sb = new System.Text.StringBuilder(s.Length);
         bool inTag = false;

@@ -315,8 +315,10 @@ internal sealed class BattleScreen : IScreenHandler
     {
         bool back = Input.GetKeyDown(KeyCode.Backspace) || Input.GetKeyDown(KeyCode.Escape);
 
-        // Backspace/Escape closes the game's big-card viewer when it's open.
-        if (back && _manager?.bigCardOverlay != null && _manager.bigCardOverlay.isOpen) { CloseBigCard(); return; }
+        // Backspace/Escape closes the game's card viewer (big-card, stack, or pile inspection) when open.
+        // This is the backstop for a viewer opened OUTSIDE card-view mode (e.g. by the FTUE); a viewer the
+        // mod opened is handled in TickCardView. Must run before the Escape→battle-menu fall-through below.
+        if (back && InspectionOpen()) { CloseInspection(); return; }
 
         // While holding a picked-up card, Backspace cancels the drag and returns it to hand.
         if (_holding && Input.GetKeyDown(KeyCode.Backspace)) { CancelPickup(); return; }
@@ -577,26 +579,63 @@ internal sealed class BattleScreen : IScreenHandler
         catch (Exception ex) { Log.Error($"BattleScreen: Done press threw: {ex.Message}"); }
     }
 
+    // The game has THREE single-card inspection overlays, and which one a click opens depends on the
+    // card (verified in the decompiled controllers): a board Pokémon DEEP-inspects to the STACK overlay
+    // (stackCardOverlay — Pokémon + its attached cards), and SHALLOW-inspects (or a hand card always
+    // opens) the BIG card overlay (bigCardOverlay); a card pile opens the CARD INSPECTION menu
+    // (cardInspectionMenu). All three are BattleMenus with isOpen/Close. The mod used to track only
+    // bigCardOverlay, so inspecting a board Pokémon (which opens stackCardOverlay) left the handler
+    // thinking nothing was open → it fell back to field nav and Escape opened the battle menu instead
+    // of closing the viewer. "Is a viewer open" / "close the viewer" must cover all three.
+    private bool InspectionOpen()
+    {
+        var m = _manager;
+        return m != null &&
+            ((m.bigCardOverlay != null && m.bigCardOverlay.isOpen)
+             || (m.stackCardOverlay != null && m.stackCardOverlay.isOpen)
+             || (m.cardInspectionMenu != null && m.cardInspectionMenu.isOpen));
+    }
+
+    // Close whichever inspection overlay is open (each routes through the game's menu navigation GoBack).
+    private void CloseInspection()
+    {
+        var m = _manager;
+        if (m == null) return;
+        BattleMenu? open = (m.bigCardOverlay != null && m.bigCardOverlay.isOpen) ? m.bigCardOverlay
+                         : (m.stackCardOverlay != null && m.stackCardOverlay.isOpen) ? m.stackCardOverlay
+                         : (m.cardInspectionMenu != null && m.cardInspectionMenu.isOpen) ? (BattleMenu)m.cardInspectionMenu
+                         : null;
+        if (open == null) return;
+        try { open.Close(); } catch (Exception ex) { Log.Error($"BattleScreen: inspection Close threw: {ex.Message}"); }
+        _router.Speech.Say("Closed card view", interrupt: true);
+    }
+
     // Toggle the game's enlarged card viewer for the focused card. This drives the same inspection
-    // path a mouse tap uses (owner.OnCardClicked → TryInitiateOwnerInspection → bigCardOverlay), and
+    // path a mouse tap uses (owner.OnCardClicked → TryInitiateOwnerInspection → the right overlay), and
     // it satisfies tutorial coaching that gates on the big-card view being open
     // (FTUEBigCardIndicator waits on bigCardOverlay.isOpen + blocks placement until you've looked).
     // I → open the game's card viewer for the focused card AND enter a locked reading mode: you
     // stay on this one card and read every printed line with Up/Down. Backspace/Escape/I exits.
     private void EnterCardView()
     {
-        var overlay = _manager?.bigCardOverlay;
         if (_manager == null) return;
-        if (overlay != null && overlay.isOpen) { CloseBigCard(); return; }   // toggle off an already-open viewer (e.g. FTUE)
+        if (InspectionOpen()) { CloseInspection(); _mode = Mode.Nav; _cvCard = null; _cvLines = null; return; }   // toggle off an already-open viewer (e.g. FTUE)
         if (_zoneCards == null || _card < 0 || _card >= _zoneCards.Count) return;
         var card = _zoneCards[_card];
         if (card == null) return;
 
+        // isAltPress: true forces the INSPECTION path (matching the game's own Card3D.OnCardClicked,
+        // which always forwards true) — without it, your own Pokémon with a usable action would open the
+        // ATTACK overlay instead of a card viewer. Enter is the mod's action key; I is purely inspect.
         if (card.owner is BaseCardOwner owner)
         {
-            try { owner.OnCardClicked(card, false); }   // opens the real viewer (also clears FTUE big-card gates)
+            try { owner.OnCardClicked(card, true); }   // opens the real viewer (also clears FTUE big-card gates)
             catch (Exception ex) { Log.Error($"BattleScreen: inspect OnCardClicked threw: {ex.Message}"); }
         }
+        // Only enter the locked reading mode if a viewer actually opened — the game blocks inspection in
+        // some states (FTUEMatchManager.blockInspection) and some cards aren't inspectable. Entering
+        // CardView with nothing open is exactly the stranded state this fix removes.
+        if (!InspectionOpen()) { _router.Speech.Say("Can't inspect this card right now", interrupt: true); return; }
         _cvCard = card;
         _cvLines = BattleBoardReader.DetailLines(card);
         _cvLine = -1;
@@ -607,7 +646,7 @@ internal sealed class BattleScreen : IScreenHandler
     private void TickCardView()
     {
         // Exit if the viewer was closed externally (the game/FTUE dismissed it).
-        if (_manager?.bigCardOverlay == null || !_manager.bigCardOverlay.isOpen)
+        if (!InspectionOpen())
         { _mode = Mode.Nav; _cvCard = null; _cvLines = null; return; }
         if (!Application.isFocused) return;
 
@@ -635,19 +674,11 @@ internal sealed class BattleScreen : IScreenHandler
 
     private void ExitCardView()
     {
-        CloseBigCard();
+        CloseInspection();
         _mode = Mode.Nav;
         _cvCard = null;
         _cvLines = null;
         _cvLine = -1;
-    }
-
-    private void CloseBigCard()
-    {
-        var overlay = _manager?.bigCardOverlay;
-        if (overlay == null || !overlay.isOpen) return;
-        try { overlay.Close(); } catch (Exception ex) { Log.Error($"BattleScreen: bigCard Close threw: {ex.Message}"); }
-        _router.Speech.Say("Closed card view", interrupt: true);
     }
 
     // ---- Action menu mode ----

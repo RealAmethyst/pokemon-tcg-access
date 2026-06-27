@@ -230,4 +230,37 @@ internal static class CardText
         'F' => "Fighting", 'D' => "Darkness", 'M' => "Metal", 'Y' => "Fairy", 'N' => "Dragon",
         'C' => "Colorless", _ => "energy",
     };
+
+    // Energy and card-property symbols live in localized text as TMP sprite tags (the game's IconReplacer
+    // turns "{G}" → <sprite name="grass" tint=1>, "{EX}" → <sprite name="ex" tint=1>, etc.). A plain
+    // tag-stripper deletes them, silently dropping what a sighted player sees — e.g. a daily quest's
+    // "{G} Energy" shows a Grass symbol that would otherwise vanish. Convert every KNOWN icon to its
+    // spoken word — handling BOTH the rendered <sprite name="…"> form that LocText.CurrentText returns
+    // AND the raw {G} token (in case some text bypassed IconReplacer) — so callers run this BEFORE their
+    // tag stripper. Unknown sprites are left untouched for that stripper to remove.
+    private static readonly Dictionary<string, string> IconWords = new()
+    {
+        { "colorless", "Colorless" }, { "fire", "Fire" }, { "grass", "Grass" }, { "water", "Water" },
+        { "fighting", "Fighting" }, { "fairy", "Fairy" }, { "darkness", "Darkness" }, { "lightning", "Lightning" },
+        { "dragon", "Dragon" }, { "metal", "Metal" }, { "psychic", "Psychic" },
+        { "ex", "ex" }, { "gx0", "GX" }, { "gx1", "GX" }, { "gx2", "GX" }, { "gx3", "GX" },
+        { "v", "V" }, { "vmax", "VMAX" }, { "vstar", "VSTAR" }, { "vunion", "V Union" },
+        { "mega", "Mega" }, { "prism_star", "Prism Star" },
+    };
+
+    private static readonly Regex SpriteIconRegex =
+        new(@"<sprite[^>]*\bname=""(?<n>[^""]+)""[^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex EnergyTokenRegex =
+        new(@"\{(?<e>[GRWLPFDMYNC])\}", RegexOptions.Compiled);
+
+    public static string SpeakIcons(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return s ?? "";
+        if (s!.IndexOf('{') >= 0)
+            s = EnergyTokenRegex.Replace(s, m => $" {EnergyName(m.Groups["e"].Value[0])} ");
+        if (s.IndexOf("<sprite", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            s = SpriteIconRegex.Replace(s, m =>
+                IconWords.TryGetValue(m.Groups["n"].Value.ToLowerInvariant(), out var w) ? $" {w} " : " ");
+        return s;
+    }
 }
