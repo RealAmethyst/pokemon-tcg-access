@@ -162,26 +162,32 @@ internal static class CardText
 
     // The card's special-rule box — the printed rule a sighted player reads off the bottom of the card
     // but which lives only on the card IMAGE, not in any loc table, so we supply it (game-fundamental
-    // text, like "Basic Pokémon" / "Retreat cost" already are). Detected from the card's format flags:
+    // text, like "Basic Pokémon" / "Retreat cost" already are):
     //   • ACE SPEC — the deckbuilding limit (one per deck across the whole ACE SPEC pool).
-    //   • Rule-box Pokémon (ex / EX / Mega Evolution ex / V / VSTAR / GX → 2 prizes; VMAX / Tag Team /
-    //     V-UNION → 3) — the opponent takes extra Prize cards when it's Knocked Out.
-    public static List<string> SpecialRuleLines(ICardDataRow? row)
+    //   • Rule-box Pokémon — the opponent takes extra Prize cards when it's Knocked Out.
+    //
+    // The KO Prize count is AUTHORITATIVE when the caller passes it (prizeValueOverride): in battle that
+    // is CardInfo.cardSource.prizeValue (= CardEntity.GetPrizeValueFromCardSource — the real printed
+    // value the engine awards). Out of battle the card DATABASE row carries no prize field, so we infer
+    // it from the rule-box format flags. The flag inference used to bucket Mega Evolution ex as 2; it
+    // actually gives 3 (like VMAX / Tag Team / V-UNION) — which is exactly why the authoritative value is
+    // preferred whenever it's available, and the flag table is corrected for the fallback.
+    public static List<string> SpecialRuleLines(ICardDataRow? row, int? prizeValueOverride = null)
     {
         var lines = new List<string>();
         if (row == null) return lines;
         try
         {
             var ff = ManagerSingleton<CardFormatManager>.instance?.FormatFlagsProvider;
-            if (ff == null) return lines;
             var flags = row.CardFormatFlags;
 
-            if (flags.HasFlag(ff.ACESPEC))
+            if (ff != null && flags.HasFlag(ff.ACESPEC))
                 lines.Add("ACE SPEC. You can have only 1 ACE SPEC card in your deck.");
 
-            int prizes = flags.HasFlag(ff.VMAX) || flags.HasFlag(ff.TagTeam) || flags.HasFlag(ff.VUNION) ? 3
-                       : flags.HasFlag(ff.ex) || flags.HasFlag(ff.EX) || flags.HasFlag(ff.MegaEvolutionEx)
-                         || flags.HasFlag(ff.V) || flags.HasFlag(ff.VSTAR) || flags.HasFlag(ff.GX) ? 2 : 1;
+            int prizes = prizeValueOverride
+                ?? (ff == null ? 1
+                    : flags.HasFlag(ff.VMAX) || flags.HasFlag(ff.TagTeam) || flags.HasFlag(ff.VUNION) || flags.HasFlag(ff.MegaEvolutionEx) ? 3
+                    : flags.HasFlag(ff.ex) || flags.HasFlag(ff.EX) || flags.HasFlag(ff.V) || flags.HasFlag(ff.VSTAR) || flags.HasFlag(ff.GX) ? 2 : 1);
             if (prizes >= 2)
                 lines.Add($"When this Pokémon is Knocked Out, your opponent takes {prizes} Prize cards.");
         }

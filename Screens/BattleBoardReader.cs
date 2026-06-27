@@ -176,8 +176,10 @@ internal static class BattleBoardReader
             var underneath = NamesWithCounts(info.attachedPokemon);
             if (!string.IsNullOrEmpty(underneath)) lines.Add("Evolved from " + underneath);
         }
-        // The special-rule box (ex / Mega ex extra-prize rule, ACE SPEC deck limit), read off the card.
-        if (row != null) lines.AddRange(CardText.SpecialRuleLines(row));
+        // The special-rule box (extra-prize rule, ACE SPEC deck limit). In battle we know the card's
+        // AUTHORITATIVE KO prize value (cardSource.prizeValue) — pass it so e.g. Mega Evolution ex reads
+        // the real 3, not a flag-inferred 2.
+        if (row != null) lines.AddRange(CardText.SpecialRuleLines(row, info?.cardSource?.prizeValue));
 
         // Every attack / ability / trainer-effect, localized — name, cost, damage, then rules text.
         // The card type is announced with the NAME (CardNameWithType); the printed flavor/metadata
