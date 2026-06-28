@@ -84,7 +84,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private string? _attachEnergyName;   // attach menu phase 2: which energy type the player chose to place
     private ReparentDamageMenu? _damageMenu;
     private DamageSelection? _damageSel;
-    private int _damagePlaced;        // counters (tens) assigned so far this damage prompt
+    private ReparentDamageConstraintEvaluator? _damageEval;   // the game's own validity + accounting authority
+    private string? _damageSource;    // MOVE: the source Pokémon currently sending (null = pick-source phase, or put-new-damage)
+    private int _damagePlaced;        // damage counters added so far this prompt (mirrors the evaluator's moved total)
     private readonly KbPlacementInitiator _attachInit = new();   // explicit-commit placement for attach-to-chosen-target
     private bool _attachHolding;
     private int _attachTicks;
@@ -198,6 +200,8 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _reparentSel = null;
         _damageMenu = null;
         _damageSel = null;
+        _damageEval = null;
+        _damageSource = null;
         _damagePlaced = 0;
         _attachHolding = false;
         _attachReceiver = null;
@@ -1164,88 +1168,194 @@ internal sealed class BattlePromptScreen : IScreenHandler
         catch (Exception ex) { Log.Error($"BattlePrompt attach Done threw: {ex.Message}"); }
     }
 
-    // ---- DAMAGE distribution (ReparentDamageMenu / DamageSelection — e.g. "Put 280 damage on 1 of
-    // your opponent's Pokémon") ----
-    // The selection's OUTPUT is each finalDamageSelections entry's newDamageCounters (counters = tens of
-    // damage). The game's OWN auto-select (DamageSelection.PerformAutoSelection) and the action-timer
-    // timeout (ReparentDamageMenu.OnTimeExpired → RandomDamageSelectionFulfiller) fulfil the selection by
-    // setting those counters and calling the menu's CompleteReparentingAction (which runs SelectInput +
-    // full teardown). We do the same — the identical pattern to submitting the attach menu via its own
-    // method, so this is the game's documented fulfilment path, not a parallel op. Targets come from
-    // toDamageSelections; each pick assigns min(maxRecvDamageSingle, remaining) counters to the chosen
-    // Pokémon, mirroring DamageSelection.AISelection. We don't touch the visual counters — the server
-    // applies the real damage and the BattleLog narrates it.
+    // ---- DAMAGE distribution (ReparentDamageMenu / DamageSelection) ----
+    // Two shapes, both routed here. PUT new counters (Phantom Dive: "put 6 damage counters on your
+    // opponent's Benched Pokémon in any way you like" — fromDamageSelections empty) and MOVE existing
+    // counters ("move a damage counter from 1 of your Pokémon to another" — fromDamageSelections non-empty).
+    //
+    // We build the selection through the game's OWN ReparentDamageConstraintEvaluator — the exact type
+    // ReparentDamageMenu uses, whose AccountForRemovedDamage/AccountForAddedDamage the real drop path
+    // (AttachDamageCounters.RecordPlacement: source-down for a move, target-up) and the auto/timeout
+    // fulfillers call. Those mutate the shared finalDamageSelections[].newDamageCounters; submitting is the
+    // menu's own CompleteReparentingAction → SelectInput. We never touch the visual counters; the server
+    // applies the real damage and the BattleLog narrates it. The evaluator is the authority on which
+    // sources/targets are valid and when the minimums are met, so we defer every limit to it.
+    //
+    // GRANULARITY: a sighted player places one increment per drag and chooses each target freely, so we
+    // place DamageStep() per pick — one increment for a free spread ("in any way you like"), or the whole
+    // fixed chunk for "N counters on each" (minRecv == maxRecv). A MOVE is a two-step pick: choose the
+    // source Pokémon (skipped when there's only one, as the game also auto-selects it), then the target.
 
     private void BuildDamageOptions(ReparentDamageMenu menu, DamageSelection ds)
     {
         _damageMenu = menu;
         _damageSel = ds;
+        _damageEval = new ReparentDamageConstraintEvaluator(ds);   // resets newDamageCounters to current (a no-op at open)
+        _damageSource = null;
         _damagePlaced = 0;
-        _target = 0;   // finishes by reaching the total, or the Done option for partial-allowed effects
-        AddDamageTargetOptions();
+        _target = 0;
+        RebuildDamageOptions();
         if (string.IsNullOrWhiteSpace(_question))
-            _question = $"Put {ds.maxMovableDamageTotal * 10} damage on a Pokémon";
+            _question = IsDamageMove
+                ? "Move damage counters from one Pokémon to another"
+                : $"Put {ds.maxMovableDamageTotal} damage counter{(ds.maxMovableDamageTotal == 1 ? "" : "s")} on your opponent's Pokémon";
     }
 
-    // One "Put N damage on <Pokémon>" per still-eligible target, plus Done when partial placement is legal.
-    private void AddDamageTargetOptions()
+    private bool IsDamageMove => _damageSel != null && _damageSel.fromDamageSelections.Count > 0;
+
+    // For a MOVE with no source chosen yet, list the eligible source Pokémon; otherwise (move target phase,
+    // or put-new-damage) list the eligible targets.
+    private void RebuildDamageOptions()
     {
         _options.Clear();
-        if (_damageSel == null) return;
-        int remaining = _damageSel.maxMovableDamageTotal - _damagePlaced;
-        foreach (var to in _damageSel.toDamageSelections)
-        {
-            if (to == null || string.IsNullOrEmpty(to.entityID)) continue;
-            int amount = DamageAmountFor(to.entityID, remaining);
-            if (amount <= 0) continue;   // this Pokémon is already at its per-target cap
-            var eid = to.entityID;
-            _options.Add(new Option { Name = $"Put {amount * 10} damage on {ResolveName(eid)}", Choose = () => MarkDamage(eid), Eid = eid });
-        }
-        // Partial distribution allowed (min < max) and the minimum already met → let the player stop here.
-        if (_damageSel.minMovableDamageTotal < _damageSel.maxMovableDamageTotal && _damagePlaced >= _damageSel.minMovableDamageTotal)
-            _options.Add(new Option { Name = "Done", Choose = SubmitDamage });
+        if (_damageSel == null || _damageEval == null) return;
+        if (IsDamageMove && _damageSource == null) BuildDamageSourceOptions();
+        else BuildDamageTargetOptions();
     }
 
-    // Counters this Pokémon can still take = min(per-target cap minus what it already holds this prompt,
-    // remaining total to distribute). Mirrors the bound DamageSelection.AISelection uses.
-    private int DamageAmountFor(string eid, int remaining)
+    private void BuildDamageSourceOptions()
+    {
+        var sources = _damageEval!.GetCardsWithDistributableDamage(null).Distinct().ToList();
+        if (sources.Count == 1) { _damageSource = sources[0]; BuildDamageTargetOptions(); return; }   // single source → skip the step
+        foreach (var eid in sources)
+        {
+            var e = eid;
+            _options.Add(new Option { Name = $"Move damage from {ResolveName(e)}", Eid = e, Choose = () => ChooseDamageSource(e) });
+        }
+        if (_damageEval.AreMinimumConstraintsSatisfied())
+            _options.Add(new Option { Name = "Done", IsDone = true, Choose = SubmitDamage });
+    }
+
+    private void ChooseDamageSource(string eid)
+    {
+        _damageSource = eid;
+        RebuildDamageOptions();
+        _idx = 0; _line = -1; _lines = null;
+        _router.Speech.Say($"Move damage from {ResolveName(eid)} to which Pokémon?", interrupt: true);
+        if (_options.Count > 0) SpeakOption(_idx, interrupt: false);
+    }
+
+    private void BackToDamageSources()
+    {
+        _damageSource = null;
+        RebuildDamageOptions();
+        _idx = 0; _line = -1; _lines = null;
+        if (!string.IsNullOrWhiteSpace(_question)) _router.Speech.Say(_question, interrupt: true);
+        if (_options.Count > 0) SpeakOption(_idx, interrupt: false);
+    }
+
+    // One option per eligible target (the evaluator already excludes the source, full targets, and targets
+    // beyond the max-target cap), labelled with the counters this pick would place. Plus Back (move) and
+    // Done (once the minimums are met).
+    private void BuildDamageTargetOptions()
+    {
+        _options.Clear();
+        if (_damageSel == null || _damageEval == null) return;
+        bool move = _damageSource != null;
+        foreach (var eid in _damageEval.GetEntityIDsForValidDamageReceivers(_damageSource).Distinct())
+        {
+            int amount = DamageAmountFor(eid);
+            if (amount <= 0) continue;
+            var e = eid;
+            string label = move ? $"Move {amount} damage counter{(amount == 1 ? "" : "s")} to {ResolveName(e)}"
+                                : $"Put {amount} damage counter{(amount == 1 ? "" : "s")} on {ResolveName(e)}";
+            _options.Add(new Option { Name = label, Eid = e, Choose = () => PlaceDamage(e) });
+        }
+        if (move) _options.Add(new Option { Name = "Back", Choose = BackToDamageSources });
+        if (_damageEval.AreMinimumConstraintsSatisfied())
+            _options.Add(new Option { Name = "Done", IsDone = true, Choose = SubmitDamage });
+    }
+
+    // Counters placed per pick: the whole fixed amount for "N on each" (minRecv == maxRecv), else one increment.
+    private int DamageStep()
+    {
+        if (_damageSel == null) return 1;
+        if (_damageSel.minRecvDamageSingle == _damageSel.maxRecvDamageSingle && _damageSel.maxRecvDamageSingle > 0)
+            return _damageSel.maxRecvDamageSingle;
+        return Math.Max(1, _damageSel.minDamageIncrement);
+    }
+
+    // Distinct Pokémon that have RECEIVED damage this prompt (a move's source has a negative NetChange, so
+    // it isn't counted) — for the min/max target-count rules.
+    private int DistinctTargetsUsed()
+        => _damageSel == null ? 0 : _damageSel.finalDamageSelections.Count(x => x.NetChange() > 0);
+
+    // Counters this pick puts on `eid`: min(one step, this target's remaining room, the total still
+    // movable, and — for a move — what the source can still send), never so many that the minimum
+    // distinct-target count becomes unreachable (reserve one increment per other target still required).
+    private int DamageAmountFor(string eid)
     {
         if (_damageSel == null) return 0;
         var f = _damageSel.finalDamageSelections.FirstOrDefault(x => x.entityID == eid);
-        int onTarget = f?.NetChange() ?? 0;
-        int perTargetRoom = _damageSel.maxRecvDamageSingle - onTarget;
-        return Math.Max(0, Math.Min(perTargetRoom, remaining));
+        int onTarget = f != null ? Math.Max(0, f.NetChange()) : 0;
+        int amount = DamageStep();
+        if (_damageSel.maxRecvDamageSingle > 0) amount = Math.Min(amount, _damageSel.maxRecvDamageSingle - onTarget);
+        if (_damageSource != null && _damageEval != null)
+        {
+            amount = Math.Min(amount, _damageEval.GetRemainingDistributableDamageForSender(_damageSource));
+            var sf = _damageSel.finalDamageSelections.FirstOrDefault(x => x.entityID == _damageSource);
+            if (sf != null) amount = Math.Min(amount, sf.newDamageCounters);   // never move more than the source still has
+        }
+        if (_damageSel.maxMovableDamageTotal > 0)
+        {
+            int othersStillNeeded = Math.Max(0, _damageSel.minTargetSelectionCount - DistinctTargetsUsed() - (onTarget <= 0 ? 1 : 0));
+            int reserve = othersStillNeeded * Math.Max(1, _damageSel.minDamageIncrement);
+            amount = Math.Min(amount, _damageSel.maxMovableDamageTotal - _damagePlaced - reserve);
+        }
+        return Math.Max(0, amount);
     }
 
-    private void MarkDamage(string eid)
+    private void PlaceDamage(string targetEid)
     {
-        if (_damageSel == null || _damageMenu == null) return;
-        var f = _damageSel.finalDamageSelections.FirstOrDefault(x => x.entityID == eid);
-        if (f == null) { _router.Speech.Say("Can't put damage there", interrupt: true); return; }
-        int amount = DamageAmountFor(eid, _damageSel.maxMovableDamageTotal - _damagePlaced);
+        if (_damageSel == null || _damageEval == null || _damageMenu == null) return;
+        int amount = DamageAmountFor(targetEid);
         if (amount <= 0) { _router.Speech.Say("That Pokémon can't take more damage", interrupt: true); return; }
 
-        f.newDamageCounters += amount;   // the selection output — same as PerformAutoSelection / the fulfiller
+        // The exact accounting the real drop does (AttachDamageCounters.RecordPlacement): take from the
+        // source (move only), give to the target — mutating the shared finalDamageSelections.
+        if (_damageSource != null) _damageEval.AccountForRemovedDamage(_damageSource, amount);
+        _damageEval.AccountForAddedDamage(targetEid, amount);
         _damagePlaced += amount;
-        Log.Info($"BattlePrompt damage: +{amount * 10} on {eid}; placed {_damagePlaced}/{_damageSel.maxMovableDamageTotal} counters");
 
-        // All the damage is placed → submit (mirrors the menu's own auto-submit when the limit is reached).
-        if (_damagePlaced >= _damageSel.maxMovableDamageTotal) { SubmitDamage(); return; }
+        bool satisfied = _damageEval.AreMinimumConstraintsSatisfied();
+        bool maxReached = _damageEval.IsMaxTotalMovedDamageLimitReached();
+        Log.Info($"BattlePrompt damage: +{amount} on {targetEid}{(_damageSource != null ? $" from {_damageSource}" : "")}; placed {_damagePlaced}/{_damageSel.maxMovableDamageTotal}, targets {DistinctTargetsUsed()}, satisfied={satisfied} maxReached={maxReached}");
 
-        // More to distribute (spread effects): announce progress and re-list the remaining targets.
-        _router.Speech.Say($"{amount * 10} damage on {ResolveName(eid)}. {(_damageSel.maxMovableDamageTotal - _damagePlaced) * 10} damage left; choose another Pokémon.", interrupt: true);
-        AddDamageTargetOptions();
-        _idx = 0;
-        _line = -1; _lines = null;
+        if (maxReached && satisfied) { SubmitDamage(); return; }
+
+        // Move: once the source can't send any more, drop back to choosing another source.
+        if (_damageSource != null && _damageEval.GetRemainingDistributableDamageForSender(_damageSource) <= 0)
+            _damageSource = null;
+
+        RebuildDamageOptions();
+        _idx = 0; _line = -1; _lines = null;
+        int remaining = _damageSel.maxMovableDamageTotal > 0 ? Math.Max(0, _damageSel.maxMovableDamageTotal - _damagePlaced) : 0;
+        string prog = $"{amount} damage counter{(amount == 1 ? "" : "s")} on {ResolveName(targetEid)}";
+        if (_damageSel.maxMovableDamageTotal > 0) prog += $". {remaining} counter{(remaining == 1 ? "" : "s")} left";
+        if (!satisfied && DistinctTargetsUsed() < _damageSel.minTargetSelectionCount) prog += $", across at least {_damageSel.minTargetSelectionCount} Pokémon";
+        prog += (IsDamageMove && _damageSource == null) ? "; choose a Pokémon to move from." : "; choose a Pokémon.";
+        _router.Speech.Say(prog, interrupt: true);
     }
 
     // Submit through the menu's OWN CompleteReparentingAction (private — reflect it, same as the attach
-    // menu's submit). It sends the selection we built (SelectInput) and tears the menu down.
+    // menu's submit). It sends the selection we built (SelectInput) and tears the menu down. Gated on the
+    // evaluator's own minimum check so we never submit an incomplete distribution.
     private void SubmitDamage()
     {
         if (_damageMenu == null) return;
-        if (_damageSel != null && _damagePlaced < _damageSel.minMovableDamageTotal)
-        { _router.Speech.Say($"Place {(_damageSel.minMovableDamageTotal - _damagePlaced) * 10} more damage first", interrupt: true); return; }
+        if (_damageEval != null && !_damageEval.AreMinimumConstraintsSatisfied())
+        {
+            if (_damageSel != null && _damagePlaced < _damageSel.minMovableDamageTotal)
+            {
+                int more = _damageSel.minMovableDamageTotal - _damagePlaced;
+                _router.Speech.Say($"Place {more} more damage counter{(more == 1 ? "" : "s")} first", interrupt: true);
+            }
+            else if (_damageSel != null && DistinctTargetsUsed() < _damageSel.minTargetSelectionCount)
+                _router.Speech.Say($"Spread the damage across at least {_damageSel.minTargetSelectionCount} Pokémon first", interrupt: true);
+            else
+                _router.Speech.Say("You can't finish the distribution yet", interrupt: true);
+            return;
+        }
         _submitted = true;
         try
         {
