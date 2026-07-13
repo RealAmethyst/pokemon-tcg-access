@@ -169,6 +169,15 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         if (deactivate != null)
             harmony.Patch(deactivate, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBEditDeckScreen), nameof(Deactivate_Postfix))));
 
+        // "Exchange all unowned" appears LATE — see RebuildTopNav. LabeledPurchaseButton.Setup is the
+        // single moment the game gives that button its label, its cost and its onClick, immediately
+        // after showing it; CraftUnownedCardsButtonController is the only thing that owns one.
+        var purchaseSetup = AccessTools.Method(typeof(LabeledPurchaseButton), nameof(LabeledPurchaseButton.Setup));
+        if (purchaseSetup != null)
+            harmony.Patch(purchaseSetup, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBEditDeckScreen), nameof(PurchaseButtonSetup_Postfix))));
+        else
+            Log.Warn("HUBEditDeckScreen: LabeledPurchaseButton.Setup not found — Exchange all unowned will only appear after a rebuild");
+
         AddCardOverlayScreen.Install(harmony, router);
         // The per-card craft popup the card detail's Craft button opens (also reused by the Card Dex).
         CraftCardOverlayScreen.Install(harmony, router);
@@ -259,7 +268,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     {
         if (_controller == null)
         {
-            if (_active) { _active = false; _router.Deactivate(this); }
+            _active = false; _router.Deactivate(this);
             return;
         }
 
@@ -351,34 +360,13 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         _deckGroupName = Loc("deck_deck", "Deck");
 
         // Category tabs (Pokémon / Trainer / Energy / All) — radio toggles.
-        var toggles = _categorySelector != null
-            ? _categorySelector.GetComponentsInChildren<Toggle>(includeInactive: false)
-                .Where(t => t.isActiveAndEnabled).Cast<Selectable>()
-                .OrderBy(s => ReadingOrder(s.transform)).ToList()
-            : new List<Selectable>();
-        var toggleSet = new HashSet<Selectable>(toggles);
+        var toggles = CategoryToggles();
         _tabsNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, RadioToggleMode = true, GroupName = "Category" };
         _tabsNav.SetItems(toggles, CategoryLabel);
 
-        // Top bar: header/options/back buttons — every Button that ISN'T a card stub's button or a
-        // category toggle. (Card stub buttons live under CardStubParts; we drive those by data.)
         _sortAnim ??= ReflectAnim(_controller, "landscapeSortingOverlay");
         _filterAnim ??= ReflectAnim(_controller, "landscapeFilterOverlay");
-        var topButtons = _controller.GetComponentsInChildren<Button>(includeInactive: false)
-            .Where(b => b.isActiveAndEnabled)
-            .Where(b => b.GetComponentInParent<CardStubParts>() == null)
-            .Where(b => !toggleSet.Contains(b))
-            .Cast<Selectable>().ToList();
-        // The bulk "Exchange all unowned" button isn't a controller child and only shows when the deck
-        // has unowned craftable cards — add it explicitly when visible (re-run every RebuildSections).
-        DiscoverExchangeButton(topButtons);
-        topButtons.Sort((a, b) => ReadingOrder(a.transform).CompareTo(ReadingOrder(b.transform)));
-        _topNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
-        _topNav.SetItems(topButtons, TopLabel);
-        // These buttons are scattered across the top bar AND the right deck panel, so auto-axis
-        // detection strands one cluster (only the first few were reachable). Force a flat Up/Down list
-        // so every option is reachable in reading order. See [[feedback_auto_detect_axes]].
-        _topNav.ForceFlatVertical();
+        RebuildTopNav();
 
         // The library's filtered list loads asynchronously (and re-loads on category/search/filter
         // changes). Subscribe to its own change callback so we focus card 0 the moment it's ready,
@@ -392,6 +380,64 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
         RefreshDeck();
         RefreshLibraryCount();
+    }
+
+    private List<Selectable> CategoryToggles() =>
+        _categorySelector != null
+            ? _categorySelector.GetComponentsInChildren<Toggle>(includeInactive: false)
+                .Where(t => t.isActiveAndEnabled).Cast<Selectable>()
+                .OrderBy(s => ReadingOrder(s.transform)).ToList()
+            : new List<Selectable>();
+
+    // Top bar: header/options/back buttons — every Button that ISN'T a card stub's button or a category
+    // toggle. (Card stub buttons live under CardStubParts; we drive those by data.)
+    //
+    // Rebuilt on its own, and not only from RebuildSections, because "Exchange all unowned" APPEARS LATE.
+    // CraftUnownedCardsButtonController hides that button on Start and re-hides it at the top of every
+    // OnDeckCardCountsChanged; it only comes back at the end of a coroutine that awaits
+    // Commerce.GetCurrencyAsync — a Task, so at best a frame later and at worst a network round trip.
+    // Every scan that races it therefore MISSES the button: on entering the editor (our OnEnter runs
+    // inside HUBEditDeckController.OnActivate, which fires OnDeckCardCountsChanged), and again after each
+    // add/remove. The player saw the option only after some overlay round-trip happened to re-scan late
+    // enough. The button's own label and cost are also written by that same Setup call, so an earlier
+    // scan couldn't have read them either. PurchaseButtonSetup_Postfix is the fix: it re-runs this the
+    // instant the game finishes setting the button up, which is exactly when a sighted player sees it.
+    private void RebuildTopNav(Selectable? refocus = null)
+    {
+        if (_controller == null) return;
+        var toggleSet = new HashSet<Selectable>(CategoryToggles());
+        var topButtons = _controller.GetComponentsInChildren<Button>(includeInactive: false)
+            .Where(b => b.isActiveAndEnabled)
+            .Where(b => b.GetComponentInParent<CardStubParts>() == null)
+            .Where(b => !toggleSet.Contains(b))
+            .Cast<Selectable>().ToList();
+        DiscoverExchangeButton(topButtons);
+        topButtons.Sort((a, b) => ReadingOrder(a.transform).CompareTo(ReadingOrder(b.transform)));
+        _topNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
+        _topNav.SetItems(topButtons, TopLabel);
+        // These buttons are scattered across the top bar AND the right deck panel, so auto-axis
+        // detection strands one cluster (only the first few were reachable). Force a flat Up/Down list
+        // so every option is reachable in reading order. See [[feedback_auto_detect_axes]].
+        _topNav.ForceFlatVertical();
+        Log.Info($"DeckEditor top: {topButtons.Count} options [{string.Join(", ", topButtons.Select(s => s.gameObject.name))}] exchange={(_exchangeButton != null ? "yes" : "no")}");
+
+        // Rebuilding drops the old navigator's cursor. If the player is standing in this section, put
+        // them back on the SAME option (by identity — the new one is inserted in reading order, so its
+        // index is not stable), silently: a sighted player just sees the button appear.
+        if (refocus == null) return;
+        int i = topButtons.IndexOf(refocus);
+        if (i >= 0) _topNav.FocusIndex(i, announce: false, interrupt: false);
+    }
+
+    // The game just gave the "Exchange all unowned" button its label, cost and onClick — i.e. it is on
+    // screen now. Re-read the Top section so the option is there before the player arrives at it, and
+    // so it appears under a player already sitting in that section.
+    private static void PurchaseButtonSetup_Postfix()
+    {
+        var s = _instance;
+        if (s == null || !s._active || s._controller == null) return;
+        try { s.RebuildTopNav(refocus: s._section == Section.Top ? s._topNav?.Current : null); }
+        catch (Exception ex) { Log.Error($"DeckEditor: exchange-button refresh threw: {ex.Message}"); }
     }
 
     // Locate the "Exchange all unowned" button (CraftUnownedCardsButtonController, not a serialized
@@ -476,7 +522,16 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             ? new[] { Section.Deck, Section.Library }
             : new[] { Section.Top, Section.Tabs, Section.Deck, Section.Library };
         int cur = Array.IndexOf(order, _section);
-        if (cur < 0) cur = 0;
+        // Currently OUTSIDE the restricted order (a hold or an FTUE card step began while the cursor was
+        // on the Top bar / Category tabs). Enter the first allowed section rather than stepping from it:
+        // treating cur as 0 means Tab SKIPS Deck and lands on Library, which is why "Tab to the deck"
+        // announced the card library instead.
+        if (cur < 0)
+        {
+            for (int i = 0; i < order.Length; i++)
+                if (SectionHasContent(order[i])) { EnterSection(order[i], announce: true, interruptPrior: true); return; }
+            return;
+        }
         for (int step = 1; step <= order.Length; step++)
         {
             var cand = order[((cur + dir * step) % order.Length + order.Length) % order.Length];
@@ -486,14 +541,18 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
     private void EnterSection(Section s, bool announce, bool interruptPrior)
     {
-        // Fall through to a section that actually has content (e.g. empty deck → Library).
+        // Fall through to a section that actually has content (e.g. empty deck → Library). Logged: the
+        // player asked for one section and lands in another, so any "it said the wrong place" report is
+        // answerable from the log rather than guessed at.
         if (!SectionHasContent(s))
         {
+            var asked = s;
             if (SectionHasContent(Section.Library)) s = Section.Library;
             else if (SectionHasContent(Section.Deck)) s = Section.Deck;
             else if (SectionHasContent(Section.Tabs)) s = Section.Tabs;
             else if (SectionHasContent(Section.Top)) s = Section.Top;
             else return;
+            Log.Info($"DeckEditor: section {asked} is empty (deck={_deckCards.Length} lib={_libCount} holding={_holding}) → entered {s}");
         }
         _section = s;
         _lineIndex = -1;
@@ -733,13 +792,29 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         var st = CurrentStack(kind);
         if (st is not { } stack || stack.IsDefault) return;
 
+        var action = kind == Kind.Deck ? CardEditorDrag.CardDropAction.Remove : CardEditorDrag.CardDropAction.Add;
+
+        // The tutorial reparents ONLY its highlighted card above an input blocker, so a sighted player
+        // physically cannot grab any other copy. We navigate the underlying data instead, which bypasses
+        // that blocker — so enforce the same restriction ourselves, from the tutorial's own element.
+        //
+        // This matters because the edit is decided by WHICH LIST you're standing in: a pick-up from the
+        // deck is a Remove. Grab the deck's copy during an "add this card" step and you remove one — and
+        // the game's drop handler fires its ftueDrop advance regardless, so the tutorial happily moves on
+        // with your deck one card short. Reported after a full tutorial run, deck checked afterwards.
+        if (FtueCardStep && FtueExpectedAction() is { } want && want != action)
+        {
+            ReAnnounceFtueCardStep();
+            return;
+        }
+
         var card = kind == Kind.Deck
             ? (TryGet(() => stack.GetPreferredDisplayCardForDeck()) ?? PreferredCard(stack))
             : PreferredCard(stack);
         if (card == null) { Say($"Can't pick up {stack.LocalizedCardName()}", interrupt: true); return; }
 
         _heldCard = card;
-        _heldAction = kind == Kind.Deck ? CardEditorDrag.CardDropAction.Remove : CardEditorDrag.CardDropAction.Add;
+        _heldAction = action;
         _heldFrom = _section;
         _heldName = stack.LocalizedCardName();
         _holding = true;
@@ -800,8 +875,9 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         if (ftue) CompleteFtueDrop();
 
         ClearHold();
-        // Full rebuild (not just the counts) so the Top "Deck options" section picks up the bulk
-        // Exchange-all button appearing/disappearing as the deck's unowned set changes.
+        // Full rebuild (not just the counts): the deck's unowned set changed, so the Top "Deck options"
+        // section may lose the Exchange-all button. It comes BACK asynchronously — the game re-shows it
+        // only after its currency check resolves — and PurchaseButtonSetup_Postfix re-runs the section then.
         RebuildSections();
 
         _section = from;
@@ -981,38 +1057,61 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     // Move the cursor onto the tutorial's target card (announcing its section + the card). Returns
     // true if it found and focused it. Deck first (small, by archetype membership), then the library
     // (by archetype index in the current filter).
+    // The edit the tutorial is asking for, named by its own indicator element. Null when the step isn't
+    // about adding or removing a card. This is the single source of truth for both where the card lives
+    // and what Enter must do to it.
+    private static CardEditorDrag.CardDropAction? FtueExpectedAction() => FTUEHook.DeckEditorFtueElement switch
+    {
+        "LibraryCard" or "AddCard" or "OpenableLibraryCard" => CardEditorDrag.CardDropAction.Add,
+        "DeckCard" or "RemoveCard" => CardEditorDrag.CardDropAction.Remove,
+        _ => null,
+    };
+
     private bool JumpToCard(string cardId)
     {
         var row = ManagerSingleton<CardDatabaseManager>.instance.TryGetCardFromDatabase(cardId);
         if (row == null) return false;
+
+        // The tutorial NAMES the list its card lives in. Search ONLY that list — and never fall back to
+        // the other one, because a lock in the wrong list makes Enter perform the OPPOSITE edit (see the
+        // guard in PickUp). Searching the deck unconditionally landed on the deck's existing copy of the
+        // archetype the tutorial wanted ADDED, so the "add a card" step removed one instead.
+        // Not found (e.g. the card is filtered out of the current category) → don't lock; the caller then
+        // announces the card by name and the player navigates to it themselves.
+        return FtueExpectedAction() switch
+        {
+            CardEditorDrag.CardDropAction.Add => TryJumpLibrary(row),
+            CardEditorDrag.CardDropAction.Remove => TryJumpDeck(row),
+            _ => TryJumpDeck(row) || TryJumpLibrary(row),
+        };
+    }
+
+    private bool TryJumpDeck(ICardDataRow row)
+    {
         for (int i = 0; i < _deckCards.Length; i++)
         {
             bool has;
             try { has = _deckCards[i].HasCard(row); } catch { has = false; }
-            if (has)
-            {
-                _section = Section.Deck;
-                Say(_deckGroupName, interrupt: false);
-                DeckFocus(i, announce: true, interrupt: false);
-                return true;
-            }
-        }
-        if (_controller?.CollectionDrawer != null)
-        {
-            int idx = _controller.CollectionDrawer.GetCardIndex(row.ArchetypeID);
-            if (idx >= 0)
-            {
-                RefreshLibraryCount();
-                if (idx < _libCount)
-                {
-                    _section = Section.Library;
-                    Say(_libGroupName, interrupt: false);
-                    LibFocus(idx, announce: true, interrupt: false);
-                    return true;
-                }
-            }
+            if (!has) continue;
+            _section = Section.Deck;
+            Say(_deckGroupName, interrupt: false);
+            DeckFocus(i, announce: true, interrupt: false);
+            return true;
         }
         return false;
+    }
+
+    private bool TryJumpLibrary(ICardDataRow row)
+    {
+        if (_controller?.CollectionDrawer == null) return false;
+        int idx = _controller.CollectionDrawer.GetCardIndex(row.ArchetypeID);
+        if (idx < 0) return false;
+        RefreshLibraryCount();
+        if (idx >= _libCount) return false;
+        _section = Section.Library;
+        Say(_libGroupName, interrupt: false);
+        LibFocus(idx, announce: true, interrupt: false);
+        return true;
     }
 
     // ── Inspect (the second method: the game's real card-detail overlay) ────────────────────────

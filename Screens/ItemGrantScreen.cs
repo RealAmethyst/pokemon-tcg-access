@@ -98,7 +98,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
     {
         if (_overlay == null || !_overlay.gameObject.activeInHierarchy)
         {
-            if (_active) { _active = false; _router.Deactivate(this); }
+            _active = false; _router.Deactivate(this);
             return;
         }
         if (!Application.isFocused) return;
@@ -220,18 +220,25 @@ internal sealed class ItemGrantScreen : IScreenHandler
 
     private static bool HasLetter(string s) { foreach (var c in s) if (char.IsLetter(c)) return true; return false; }
 
+    // The tutorial DISABLES this button. ItemGrantButtonController.WaitForOverlay sets
+    // `grantOverlay.collectAllButton.interactable = false` as soon as any item-grant FTUE step arms, and
+    // only its CollectAll step ever turns it back on — during the ClickItem step you are meant to reveal
+    // each card yourself. So it stays reachable (you can tab to a dimmed control) but reads as
+    // unavailable, and pressing it says so instead of doing nothing at all.
     private string CollectAllLabel()
     {
         var btn = _overlay?.collectAllButton;
         var t = btn != null ? btn.GetComponentInChildren<TMPro.TMP_Text>(includeInactive: false) : null;
-        return t != null && !string.IsNullOrWhiteSpace(t.text) ? t.text : "Collect All";
+        var label = t != null && !string.IsNullOrWhiteSpace(t.text) ? t.text : "Collect All";
+        return btn != null && !btn.IsInteractable() ? $"{label}, unavailable" : label;
     }
 
     private void CollectAll()
     {
         var btn = _overlay?.collectAllButton;
-        if (btn != null && btn.isActiveAndEnabled && btn.IsInteractable())
-            btn.onClick?.Invoke();
+        if (btn == null || !btn.isActiveAndEnabled) return;
+        if (!btn.IsInteractable()) { _router.Speech.Say(CollectAllLabel(), interrupt: true); return; }
+        btn.onClick?.Invoke();
     }
 
     private void AnnounceItem(ContentItemRewardController? item, bool interrupt)

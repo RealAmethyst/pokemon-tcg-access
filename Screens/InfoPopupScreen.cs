@@ -72,7 +72,7 @@ internal sealed class InfoPopupScreen : IScreenHandler
     {
         if (_popup == null || !_popup.gameObject.activeInHierarchy)
         {
-            if (_active) { _active = false; _router.Deactivate(this); _popup = null; }
+            _active = false; _router.Deactivate(this); _popup = null;
             return;
         }
         if (!Application.isFocused) return;

@@ -47,6 +47,42 @@ internal static class RankReader
         catch { return null; }
     }
 
+    // Same readout for an ARBITRARY player (the VS screen shows both players' standing, not just our
+    // own SeasonRank static): pass the exp + Elo snapshot from PlayerDetails. Mirrors what the game
+    // renders on SeasonRankDetails — the top "competitive" league shows Elo, every other shows the
+    // cumulative rank-points count. Omits the "points to next rank" tail (clutter for a matchup line).
+    public static string? StatusFor(uint exp, uint competitiveElo)
+    {
+        try
+        {
+            var cfg = HUBLeagueTowerController.seasonConfigContent?.leagueConfigContent;
+            if (cfg == null) return null;
+
+            var league = cfg.GetLeagueDataByEXP(exp);
+            var rank = cfg.GetRankByEXP(exp);
+            var leagueName = Loc(league?.leagueName);
+            var rankName = Loc(rank?.rankName);
+
+            // The competitive league is the last one in the config; it displays Elo, not rank points.
+            var leagues = cfg.leagueData;
+            var top = (leagues != null && leagues.Count > 0) ? leagues[leagues.Count - 1] : null;
+            bool isCompetitive = top != null && league != null &&
+                (ReferenceEquals(league, top) || league.leagueName == top.leagueName);
+
+            var head = new List<string>(2);
+            if (!string.IsNullOrWhiteSpace(leagueName)) head.Add(leagueName!);
+            if (!string.IsNullOrWhiteSpace(rankName) && rankName != leagueName) head.Add(rankName!);
+
+            var sb = new StringBuilder(head.Count > 0 ? string.Join(", ", head) : "Rank");
+            if (isCompetitive)
+                sb.Append(", ").Append(competitiveElo).Append(" Elo");
+            else
+                sb.Append(", ").Append(exp).Append(exp == 1 ? " rank point" : " rank points");
+            return sb.ToString();
+        }
+        catch { return null; }
+    }
+
     private static string? Loc(string? id)
     {
         if (string.IsNullOrWhiteSpace(id)) return null;

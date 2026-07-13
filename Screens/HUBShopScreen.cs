@@ -198,7 +198,7 @@ internal sealed class HUBShopScreen : IScreenHandler
     {
         if (_controller == null)
         {
-            if (_active) { _active = false; _router.Deactivate(this); }
+            _active = false; _router.Deactivate(this);
             return;
         }
         if (!Application.isFocused) return;
@@ -402,6 +402,8 @@ internal sealed class HUBShopScreen : IScreenHandler
 
         AddGroup(new List<Selectable> { target });
         _activeGroup = 0;
+        // A coached Toggle is a tab, so Enter must SELECT it — see FTUEHook.FocusedElement.
+        _groups[0].RadioToggleMode = target is Toggle;
         _groups[0].FocusFirst(announce: true, interruptPrior: true);
     }
 

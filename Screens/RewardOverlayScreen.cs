@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
+using PokemonTCGLiveAccessibility.Hooks;
 using PokemonTCGLiveAccessibility.Navigation;
 using PokemonTCGLiveAccessibility.Util;
 using SharedLogicUtils.source.DataTypes;
@@ -31,6 +32,7 @@ internal sealed class RewardOverlayScreen : IScreenHandler
     private RewardOverlaysController? _controller;
     private bool _active;
     private readonly KeyboardNavigator _nav;
+    private Selectable? _lastFtueTarget;
 
     public string Name => "Rewards";
 
@@ -56,6 +58,12 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         var close = AccessTools.Method(typeof(RewardOverlaysController), "CloseScreen");
         if (close != null)
             harmony.Patch(close, postfix: new HarmonyMethod(AccessTools.Method(typeof(RewardOverlayScreen), nameof(Close_Postfix))));
+
+        // The tutorial coaches this overlay via FTUERewardsPopupIndicator → RewardsPopupButtonController,
+        // whose Focus() starts a coroutine that waits for OverlayManager.currentOverlay to BE the reward
+        // overlay before it highlights COLLECT REWARDS. So the focus always lands after we've opened and
+        // announced (measured: 180 ms later) — checking for it in OnEnter would always miss it.
+        FTUEHook.FocusedElementChanged += () => _instance?.OnFtueFocusChanged();
 
         Log.Info("RewardOverlayScreen installed");
     }
@@ -85,7 +93,7 @@ internal sealed class RewardOverlayScreen : IScreenHandler
 
     public void Tick()
     {
-        if (_controller == null) { if (_active) { _active = false; _router.Deactivate(this); } return; }
+        if (_controller == null) { _active = false; _router.Deactivate(this); return; }
         if (!Application.isFocused) return;
         // Backstop: let go so the HUB underneath regains focus once the reward overlay is no longer
         // showing. CRITICAL: a HUB overlay closed via OverlayManager (OnDeActivate) only disables its
@@ -116,19 +124,54 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         catch { return true; }   // if the manager isn't reachable, don't yank focus prematurely
     }
 
-    private void Rebuild(bool announce)
+    // The one button the tutorial wants pressed on THIS overlay, or null when it isn't coaching us.
+    //
+    // MenuButtonController.Focus REPARENTS the coached Selectable under an input blocker and leaves every
+    // other button behind it — unclickable. Two consequences: CollectButtons() can no longer even find
+    // COLLECT REWARDS (it's no longer a child of the controller or the overlay), and focusing anything
+    // else hands the player a button the game will ignore. So while we're coached, we present exactly the
+    // coached button and nothing else.
+    //
+    // isOverlay is what tells us the focus is OURS. When this overlay opens, the FTUE is still pointing at
+    // Btn_TierReward on the Battle Pass screen behind us (reparented under the MAIN blocker); following
+    // that blindly would focus a button on another screen. The overlay's coached button goes under the
+    // OVERLAY blocker instead, and FocusedElement.isOverlay records which.
+    private static Selectable? FtueTarget()
+    {
+        if (!FTUEHook.FtueIsRunning || !FTUEHook.FocusedElementIsOverlay) return null;
+        var target = FTUEHook.FocusedElement;
+        return target != null && target.isActiveAndEnabled ? target : null;
+    }
+
+    private void OnFtueFocusChanged()
+    {
+        if (!_active || _controller == null) return;
+        var target = FtueTarget();
+        if (ReferenceEquals(target, _lastFtueTarget)) return;
+        // Focus released — the coached button was pressed and the flow is moving on (an item-grant reveal
+        // opens over us). Restore the full button set silently rather than talking over what comes next.
+        if (target == null) { Rebuild(announce: false); return; }
+        // The title + reward contents were spoken when the overlay opened; only the new focus is news.
+        Rebuild(announce: true, speakTitle: false);
+    }
+
+    private void Rebuild(bool announce, bool speakTitle = true)
     {
         if (_controller == null) return;
-        var items = CollectButtons();
+
+        var ftue = FtueTarget();
+        _lastFtueTarget = ftue;
+
+        var items = ftue != null ? new List<Selectable> { ftue } : CollectButtons();
         _nav.SetItems(items, RewardButtonLabel);
-        _nav.AllowHorizontal = true;   // reward buttons sit in a row
+        _nav.AllowHorizontal = ftue == null;   // reward buttons sit in a row; a coached one is alone
         if (!announce) return;
 
-        var title = OverlayTitle();
+        var title = speakTitle ? OverlayTitle() : null;
         if (!string.IsNullOrWhiteSpace(title))
         {
             _router.Speech.Say(title!, interrupt: true);
-            Log.Info($"RewardOverlay: {title} ({items.Count} buttons)");
+            Log.Info($"RewardOverlay: {title} ({items.Count} buttons{(ftue != null ? ", tutorial-focused" : "")})");
         }
         if (items.Count > 0) _nav.FocusFirst(announce: true, interruptPrior: string.IsNullOrWhiteSpace(title));
         else _router.Speech.Say(Name, interrupt: string.IsNullOrWhiteSpace(title));
@@ -170,9 +213,17 @@ internal sealed class RewardOverlayScreen : IScreenHandler
     // the contents are spoken in the announcement rather than focused as bare "x1" count buttons.
     private string? RewardsSummary()
     {
-        if (_controller?.activeOverlay is not ContentItemRewardOverlay ov || ov.rewardHolder == null) return null;
+        if (_controller?.activeOverlay is not ContentItemRewardOverlay ov) return null;
+        return SummarizeRewards(ov.rewardHolder);
+    }
+
+    // Read a reward holder's spawned ProductItemSummarySlots by name + count. Shared with the season
+    // ladder overlay (SeasonResetOverlayScreen), which builds the same slots from its own rewardHolder.
+    internal static string? SummarizeRewards(Transform? rewardHolder)
+    {
+        if (rewardHolder == null) return null;
         var parts = new List<string>();
-        foreach (var slot in ov.rewardHolder.GetComponentsInChildren<ProductItemSummarySlot>(includeInactive: false))
+        foreach (var slot in rewardHolder.GetComponentsInChildren<ProductItemSummarySlot>(includeInactive: false))
         {
             var item = ReadFieldObj(slot, "currentItem") is ItemData d ? d : default;
             if (item.itemType == ItemData.ItemType.None) continue;
@@ -267,7 +318,7 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         return null;
     }
 
-    private static string? TmpText(Component? c)
+    internal static string? TmpText(Component? c)
     {
         if (c == null || !c.gameObject.activeInHierarchy) return null;
         var tmp = c.GetComponent<TMPro.TMP_Text>() ?? c.GetComponentInChildren<TMPro.TMP_Text>(includeInactive: false);

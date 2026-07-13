@@ -281,7 +281,12 @@ The outer Profile screen and every inner avatar customization category panel are
      overlays, global `P` reads currency balances. See memory `project_shop_system.md`. Pending
      in-game verification.
    - `HUBExpansionChallengeScreenController` (BATTLE PASS)
-   - `HUBCardDexController` (CARD DEX)
+   - **CARD DEX — built 2026-06-29** (`HUBCardDexScreenController`, a MonoBehaviour spawned by
+     `CardDexFeatureDriver` — hook its `OnActivate()`/`OnDeactivate()`): `HUBCardDexScreen` +
+     `CardDexCardOverlayScreen` (big-card detail) + `CardDexSections` (carousel/grid) +
+     `Util/CardDexText`. Series picker + set carousel + master/main view toggle + sort + virtualized
+     card grid; landscape series/sort are in-place dropdowns (poll-detected sub-modes). See memory
+     `project_card_dex_system.md`. Pending in-game verification. **This was the last major HUB screen.**
 
 9. **Verify WndProc subclass alone is sufficient** — strip the `WS_POPUP → WS_OVERLAPPEDWINDOW` style change from `WindowFix.cs` and confirm screen reader still works without the visible titlebar. Still pending from Phase 0.
 

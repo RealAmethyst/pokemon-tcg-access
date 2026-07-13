@@ -20,24 +20,42 @@ internal sealed class KbPlacementInitiator : ICardTargetInitiator
     private readonly KbReceiverFinder _finder = new();
 
     // The receiver the player has navigated to. The game highlights it as "imminent" each frame
-    // and commits onto it once Commit flips true.
+    // and commits onto it once the placement is armed.
     public void SetChosen(ICardPlacementReceiver? receiver) => _finder.Chosen = receiver;
 
-    // Flipped true (with a chosen receiver set) when the player presses Enter to drop.
-    public bool Commit;
+    // Armed when the player presses Enter to drop. EDGE-TRIGGERED, like every native initiator:
+    // CardPickupHandler and ClickReleaseAutoPlacementInitiator return InputManager.IsClickUp() (true
+    // for exactly one frame), and MatchAutomationTargetingInitiator — the game's own programmatic
+    // placement — consumes its flag as it reports it. ReceiverPlacementHandler polls this once per
+    // iteration of its evaluation loop, and AutoTargetingHandler literally waits for it to go false
+    // again (`while (_targetInitiator.ShouldAttemptPlacement()) yield return null;`), so a latched
+    // "true" is a lie the game will believe for as long as it holds the initiator.
+    private bool _armed;
+
+    // Arm the placement for the evaluation loop's next exit check. Set the receiver via SetChosen
+    // BEFORE the loop's pass that precedes it: the loop records the imminent receiver, yields, and
+    // only then asks us — so the receiver it commits to is the one it saw in that same iteration.
+    public void ArmPlacement() => _armed = true;
 
     public void Reset()
     {
-        Commit = false;
+        _armed = false;
         _finder.Chosen = null;
     }
 
-    // Force the explicit-commit path — never auto-place on the first valid receiver.
+    // Force the explicit-commit path — never auto-place on the first valid receiver. Matches
+    // CardPickupHandler (the hand-drag path this stands in for), which is also false.
     public bool IsAutoPlacementSupported => false;
 
     public IPlacementReceiverIntersectionTester GetImminentReceiverFinder() => _finder;
 
-    public bool ShouldAttemptPlacement() => Commit;
+    public bool ShouldAttemptPlacement()
+    {
+        if (!_armed) return false;
+        _armed = false;
+        return true;
+    }
+
     public bool ShouldCancelTarget() => false;   // we cancel explicitly via CardTargetingHandler.ClearTarget()
 
     public void StartCardTargetedFeedback(ICard3D card) { }

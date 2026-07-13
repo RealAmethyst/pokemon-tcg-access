@@ -84,7 +84,8 @@ internal sealed class CraftCardOverlayScreen : IScreenHandler
         if (_instance == null || _instance._popup != __instance || !_instance._active) return;
         // A purchase we issued that bumped the owned count = a successful craft. (Independent of
         // _confirming, which an intervening error/pending overlay's resume may already have cleared.)
-        if (_instance._ownedAtConfirm >= 0 && _instance.Owned() > _instance._ownedAtConfirm && AddCardOverlayScreen.IsOpen)
+        if (_instance._ownedAtConfirm >= 0 && _instance.Owned() > _instance._ownedAtConfirm
+            && (AddCardOverlayScreen.IsOpen || CardDexCardOverlayScreen.IsOpen))
             JustCrafted = true;
         _instance._active = false;
         _instance._confirming = false;
@@ -104,7 +105,7 @@ internal sealed class CraftCardOverlayScreen : IScreenHandler
     {
         if (_popup == null || !IsOpen())
         {
-            if (_active) { _active = false; _router.Deactivate(this); _popup = null; }
+            _active = false; _router.Deactivate(this); _popup = null;
             return;
         }
         if (!Application.isFocused) return;

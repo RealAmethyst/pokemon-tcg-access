@@ -28,9 +28,34 @@ namespace PokemonTCGLiveAccessibility.Hooks;
 // (Hooking only Focus(int,…) missed the multi-arg overload, so the tier-reward button never
 // surfaced.) `previousElement.elements[0]` is the highlighted Selectable; we expose it directly.
 // Clears come through Unfocus(). Screens query FTUEHook.FocusedElement each Tick / on resume.
+//
+// ACTIVATING IT. The focused element is the one control the tutorial wants pressed, and
+// RainierScreenIndicator.AddElementListeners tells us exactly how the tutorial listens for that press:
+// a Button on `onClick`, a TMP_InputField on `onSubmit`, a Toggle on `onValueChanged`. Whatever presents
+// the focus for the keyboard must fire the matching one, or the step can never complete.
+//
+// The Toggle case is the trap. It is never a checkbox — it's a tab (Shop's PageDragTab, HOME's game-mode
+// tabs; note PageDragTab is a MonoBehaviour beside the real Toggle, and ShopBuilder.GetTabButton hands the
+// FTUE that Toggle). KeyboardNavigator's default checkbox semantics make Enter a deliberate no-op on a
+// Toggle, so an unguarded FTUE group turns the tutorial's own step into a dead key with no speech at all:
+// on 2026-07-10 a player sat on the Shop's coached tab pressing Enter into silence, unable to continue.
+// Presenting the focus therefore means `nav.RadioToggleMode = focus is Toggle`, which selects it
+// (`isOn = true`) instead — the exact sighted click, since the game leaves only the UNSELECTED tab
+// interactable (ImprovedToggle.SetState_Silent) and ShopScreenButtonController.Focus bypasses the step
+// entirely when the coached tab isn't interactable.
 internal static class FTUEHook
 {
     public static Selectable? FocusedElement { get; private set; }
+
+    // FocusedElement.isOverlay — the game's own answer to "which blocker did this element get reparented
+    // under". MenuButtonController.ShowBlockerClearPrevious → ToggleOverlay(state, isOverlay) puts an
+    // overlay's coached button beneath the OVERLAY blocker and a screen's beneath the main one. It is the
+    // only reliable way to tell whose element the focus belongs to, because FocusedElement REPARENTS the
+    // Selectable out of its own screen (Btn_Collect ends up under OverlayBlocker, not under the reward
+    // overlay), so parentage no longer identifies the owner. An overlay handler must ignore a focus that
+    // is still pointing at the screen behind it.
+    public static bool FocusedElementIsOverlay { get; private set; }
+
     public static event Action? FocusedElementChanged;
 
     public static bool FtueIsRunning
@@ -78,17 +103,26 @@ internal static class FTUEHook
         }
     }
 
-    // True while the FTUE is TEACHING the attack/ability overlay (FTUEAttackOverlayIndicator). That
-    // state only points coaching arrows at elements or focuses the close button and waits for you to
-    // CLOSE the overlay — none of its branches ever execute an attack. So the player must not be able
-    // to invoke an attack/ability/retreat during it: the game doesn't guard the op (it assumes you
-    // follow the coaching), so doing so desyncs and freezes the tutorial. The player reads + backs out.
-    public static bool AttackOverlayTeachingActive
+    // True while an FTUE indicator that ARMS a per-action focus (attack / ability / retreat) is running.
+    // FTUEActionIndicator and FTUEAbilityIndicator both spotlight the card (BlockOtherCards), wait for
+    // the attack overlay to open, and only THEN call Card3D.FocusAttack / FocusAbility / FocusRetreat.
+    // Between the spotlight and that call the card's focus fields are still their -1 default even though
+    // the tutorial will restrict play to one action — and firing in that pre-arm window strands the
+    // coroutine. BattleScreen.FtueStepUnarmed reads this to distinguish "not armed YET" (these states →
+    // block the spotlighted card) from "no per-action restriction at all" (every OTHER spotlight state,
+    // e.g. FTUECardIndicator driving a stadium ability like Surfing Beach — the ability is legitimately
+    // usable at -1, so the game's own button.interactable governs it and we must not grey it out).
+    // FTUEActionIndicator lives in the global namespace; FTUEAbilityIndicator is fully qualified.
+    public static bool ActionArmingIndicatorActive
     {
         get
         {
             for (int i = 0; i < _trackedStates.Count; i++)
-                if (_trackedStates[i] is FTUEAttackOverlayIndicator) return true;
+            {
+                var s = _trackedStates[i];
+                if (s is global::FTUEActionIndicator) return true;
+                if (s is TPCI.Rainier.FTUE.States.Match.BattleUi.FTUEAbilityIndicator) return true;
+            }
             return false;
         }
     }
@@ -180,7 +214,8 @@ internal static class FTUEHook
             // focus — real clears come through Unfocus(). Only react to an actual new element.
             if (selectable == null || selectable == FocusedElement) return;
             FocusedElement = selectable;
-            Log.Info($"FTUE focus: {selectable.gameObject.name}  chain: {ParentChain(selectable.transform)}");
+            FocusedElementIsOverlay = prev!.isOverlay;
+            Log.Info($"FTUE focus: {selectable.gameObject.name} (overlay={FocusedElementIsOverlay})  chain: {ParentChain(selectable.transform)}");
             FocusedElementChanged?.Invoke();
         }
         catch (Exception ex)
@@ -208,6 +243,7 @@ internal static class FTUEHook
     {
         if (FocusedElement == null) return;
         FocusedElement = null;
+        FocusedElementIsOverlay = false;
         Log.Info("FTUE focus cleared");
         FocusedElementChanged?.Invoke();
     }

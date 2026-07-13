@@ -261,6 +261,8 @@ internal sealed class HUBProfileScreen : IScreenHandler
 
         AddGroup(new List<Selectable> { target });
         _activeGroup = 0;
+        // A coached Toggle is a tab, so Enter must SELECT it — see FTUEHook.FocusedElement.
+        _groups[0].RadioToggleMode = target is Toggle;
         _groups[0].FocusFirst(announce: true, interruptPrior: true);
     }
 
@@ -299,11 +301,8 @@ internal sealed class HUBProfileScreen : IScreenHandler
     {
         if (_controller == null)
         {
-            if (_active)
-            {
-                _active = false;
-                _router.Deactivate(this);
-            }
+            _active = false;
+            _router.Deactivate(this);   // no-ops unless we're on top
             return;
         }
         if (_groups.Count == 0) return;

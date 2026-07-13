@@ -38,9 +38,13 @@ public class Mod : MelonMod
 
         CurrencyReader.Install(_speech);
         PlayerNameReader.Install(_speech, _router);
+        HubTabShortcuts.Install(_speech);
 
         LocalizationHook.Install(HarmonyInstance, _speech);
+        MatchReadyHook.Install(HarmonyInstance);
         BattleLogHook.Install(HarmonyInstance, _speech);
+        MatchIntroHook.Install(HarmonyInstance, _speech);
+        RankUpHook.Install(HarmonyInstance, _speech);
         FTUEHook.Install(HarmonyInstance);
         FtueFocusFallback.Install(_router);
 
@@ -61,6 +65,8 @@ public class Mod : MelonMod
         HUBHomeScreen.Install(HarmonyInstance, _router);
         HUBShopScreen.Install(HarmonyInstance, _router);
         HUBExpansionChallengeScreen.Install(HarmonyInstance, _router);
+        HUBCardDexScreen.Install(HarmonyInstance, _router);
+        CardDexCardOverlayScreen.Install(HarmonyInstance, _router);
         LeagueTowerScreen.Install(HarmonyInstance, _router);
         InfoPopupScreen.Install(HarmonyInstance, _router);
         BnbPopupScreen.Install(HarmonyInstance, _router);
@@ -73,6 +79,7 @@ public class Mod : MelonMod
         ItemGrantScreen.Install(HarmonyInstance, _router);
         ErrorOverlayScreen.Install(HarmonyInstance, _router);
         RewardOverlayScreen.Install(HarmonyInstance, _router);
+        SeasonResetOverlayScreen.Install(HarmonyInstance, _router);
         GiftOverlayScreen.Install(HarmonyInstance, _router);
         NewsOverlayScreen.Install(HarmonyInstance, _router);
         HUBOverflowMenuScreen.Install(HarmonyInstance, _router);
@@ -105,6 +112,9 @@ public class Mod : MelonMod
         CurrencyReader.Tick();
         // "Read + copy my screen name" key (N) — scoped to the Profile + friends screens.
         PlayerNameReader.Tick();
+        // Number-row (1-6) jumps straight to a HUB top-strip tab (HOME/DECKS/…) — only where the
+        // strip is actually clickable (no-ops in battle, under a popup, or in a text field).
+        HubTabShortcuts.Tick();
         // Global FTUE-focus fallback: surfaces the tutorial's highlighted element on screens we
         // don't handle yet. No-ops whenever a screen handler is active (checks _router.Active).
         FtueFocusFallback.Tick();

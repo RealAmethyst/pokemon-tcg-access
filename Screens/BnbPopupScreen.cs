@@ -75,7 +75,7 @@ internal sealed class BnbPopupScreen : IScreenHandler
     {
         if (_overlay == null || !_overlay.gameObject.activeInHierarchy)
         {
-            if (_active) { _active = false; _router.Deactivate(this); _overlay = null; }
+            _active = false; _router.Deactivate(this); _overlay = null;
             return;
         }
         if (!Application.isFocused) return;

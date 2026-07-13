@@ -64,7 +64,7 @@ internal sealed class BnbLobbyScreen : IScreenHandler
     {
         if (_controller == null || !_controller.gameObject.activeInHierarchy)
         {
-            if (_active) { _active = false; _router.Deactivate(this); _controller = null; }
+            _active = false; _router.Deactivate(this); _controller = null;
             return;
         }
         if (!Application.isFocused) return;

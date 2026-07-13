@@ -10,29 +10,44 @@ namespace PokemonTCGLiveAccessibility.Screens;
 // FTUE tutorial battle intro — the "BATTLE X OUT OF Y" overlay shown before each of the
 // six tutorial battles (and on resume of a partially-completed tutorial).
 //
-// Driver: FTUEManager (TPCI.RainierClient/FTUEManager.cs).
-//   - `ChangeBattleText()` opens the panel (SetActive(true) + OverlayManager.OpenOverlay
-//     + sets battle count header and description text).
-//   - `CloseBattleCanvas()` dismisses it (SetActive(false) + OverlayManager.CloseOverlay).
-//   - The three buttons each trigger their own dismiss-and-advance flow:
-//       PlayButton → PlayBattle()         — starts the tutorial battle
-//       SkipThisButton → SkipThisBattle() — advances one checkpoint
-//       SkipAllButton → SkipAllBattles()  — skips through all remaining tutorial battles
+// Driver: FTUEManager (TPCI.RainierClient/FTUEManager.cs). Everything hangs off one piece of
+// game state: `FTUEManagerParts.battleCanvas`, the GameObject the panel lives on. Three methods
+// toggle it, and each is hooked here so we open and close exactly when the game does:
+//   - `ChangeBattleText()` — battleCanvas.SetActive(true) + OverlayManager.OpenOverlay, then fills
+//     in the battle count header and description. But only while battles remain: once the last one
+//     is done it falls through to CloseBattleCanvas() instead. So "ChangeBattleText ran" does NOT
+//     mean "the panel is up" — ask the canvas.
+//   - `CloseBattleCanvas()` — battleCanvas.SetActive(false) + OverlayManager.CloseOverlay. Reached
+//     from that else-branch and from the SkipThis / SkipAll completion callbacks.
+//   - `PlayBattle()` — battleCanvas.SetActive(false) directly, WITHOUT calling CloseBattleCanvas,
+//     then triggers the animator into the match.
 //
-// Text and buttons live on `FTUEManagerParts` (a MonoBehaviour wrapper accessed via the
-// private `FTUEManager.CurrentParts` property which picks between portrait and landscape
-// variants based on `GameManager.IsLandscapeAspectRatio()`). All its fields are public, so
-// once we resolve CurrentParts we can read battleCountText / battleText (LocText.CurrentText
-// gives the already-formatted display string, e.g. "BATTLE 1 OUT OF 6") and grab the three
-// Buttons directly.
+// That last one is why this handler used to strand the player. Hooking only CloseBattleCanvas
+// meant pressing PLAY never popped us: we sat on the router stack under Battle for the whole
+// tutorial match (HOME never resumed beneath us), and after the final battle ChangeBattleText's
+// else-branch closed the panel while the postfix promptly re-activated us over a now-hidden
+// canvas — an empty screen that swallowed every keypress.
+//
+// So there is no `_active` mirror and no cached manager here: `FTUEManager.instance` and
+// `battleCanvas.activeInHierarchy` already are the game's answer. It's a plain GameObject
+// SetActive, not an OverlayManager canvas-disable, so activeInHierarchy is trustworthy (cf.
+// [[feedback-overlay-close-signal]]).
+//
+// Text and buttons live on `FTUEManagerParts`, reached through the private `FTUEManager.CurrentParts`
+// property, which picks between the portrait and landscape variants and memoises the result. All its
+// fields are public, so once we resolve CurrentParts we can read battleCountText / battleText
+// (LocText.CurrentText gives the formatted display string, e.g. "BATTLE 1 OUT OF 6") and grab the
+// three Buttons directly.
 internal sealed class FTUEBattleIntroScreen : IScreenHandler
 {
     private static FTUEBattleIntroScreen? _instance;
 
+    // Handle on the game's own lazily-resolved parts property — not a copy of its value.
+    private static readonly MethodInfo? CurrentPartsGetter =
+        AccessTools.PropertyGetter(typeof(FTUEManager), "CurrentParts");
+
     private readonly ScreenRouter _router;
     private readonly KeyboardNavigator _nav;
-    private FTUEManager? _manager;
-    private bool _active;
 
     public string Name => "FTUEBattleIntro";
 
@@ -54,44 +69,36 @@ internal sealed class FTUEBattleIntroScreen : IScreenHandler
             return;
         }
         harmony.Patch(change, postfix: new HarmonyMethod(
-            AccessTools.Method(typeof(FTUEBattleIntroScreen), nameof(ChangeBattleText_Postfix))));
+            AccessTools.Method(typeof(FTUEBattleIntroScreen), nameof(CanvasShown_Postfix))));
 
-        var close = AccessTools.Method(typeof(FTUEManager), "CloseBattleCanvas");
-        if (close != null)
-            harmony.Patch(close, postfix: new HarmonyMethod(
-                AccessTools.Method(typeof(FTUEBattleIntroScreen), nameof(CloseBattleCanvas_Postfix))));
+        // Both hide paths. PlayBattle bypasses CloseBattleCanvas, so it needs its own hook or
+        // pressing PLAY leaves this handler parked on the stack for the whole match.
+        foreach (var name in new[] { "CloseBattleCanvas", nameof(FTUEManager.PlayBattle) })
+        {
+            var hide = AccessTools.Method(typeof(FTUEManager), name);
+            if (hide == null) { Log.Error($"FTUEBattleIntroScreen: {name} not found"); continue; }
+            harmony.Patch(hide, postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(FTUEBattleIntroScreen), nameof(CanvasHidden_Postfix))));
+        }
 
         Log.Info("FTUEBattleIntroScreen installed");
     }
 
-    private static void ChangeBattleText_Postfix(FTUEManager __instance)
+    // ChangeBattleText both opens the panel and refreshes it for the next battle in the sequence
+    // (SkipThisBattle advances a checkpoint without ever hiding the canvas). Re-announce on a
+    // refresh so the user hears the new battle's header and description.
+    private static void CanvasShown_Postfix()
     {
         if (_instance == null) return;
-        _instance._manager = __instance;
-        if (!_instance._active)
-        {
-            _instance._active = true;
-            _instance._router.Activate(_instance);
-        }
-        else
-        {
-            // Already active — ChangeBattleText was called again for the next battle in the
-            // sequence (e.g. after PlayBattle finished and the next intro fires). Rebuild +
-            // re-announce so the user hears the new battle's text.
-            _instance.BuildNav();
-            _instance.Announce();
-        }
+        if (!_instance.IsOpen) { _instance.Close(); return; }   // the else-branch: last battle done
+
+        if (_instance.IsActiveHandler) { _instance.BuildNav(); _instance.Announce(); }
+        else _instance._router.Activate(_instance);                   // → OnEnter
     }
 
-    private static void CloseBattleCanvas_Postfix(FTUEManager __instance)
-    {
-        if (_instance == null) return;
-        if (_instance._manager != __instance) return;
-        if (!_instance._active) return;
-        _instance._active = false;
-        _instance._router.Deactivate(_instance);
-        _instance._manager = null;
-    }
+    private static void CanvasHidden_Postfix() => _instance?.Close();
+
+    private bool IsActiveHandler => ReferenceEquals(_router.Active, this);
 
     public void OnEnter()
     {
@@ -101,32 +108,34 @@ internal sealed class FTUEBattleIntroScreen : IScreenHandler
 
     public void OnResume()
     {
-        // Re-entry (e.g. if a modal popped on top and just closed). Refresh nav in case
-        // button states changed and re-announce the focused button.
+        // Re-entry (e.g. a modal popped on top and just closed). Refresh nav in case button
+        // states changed and re-announce the focused button.
         BuildNav();
         _nav.RefocusCurrent(announce: true);
     }
 
-    public void OnExit() { /* preserve _manager across pause */ }
+    public void OnExit() { }
 
     public void RespeakAll() => Announce();
 
     public string StateSignature()
     {
-        if (_manager == null) return "FTUEBattleIntro|dead";
+        if (!IsOpen) return "FTUEBattleIntro|dead";
         var (header, description) = ReadTexts();
         return $"FTUEBattleIntro|{header}|{description}|{_nav.Index}";
     }
 
     public void Tick()
     {
-        if (_manager == null)
-        {
-            if (_active) { _active = false; _router.Deactivate(this); }
-            return;
-        }
+        // Backstop for hide paths we don't hook — FTUEManager also blanks both parts' canvases
+        // directly when it tears the tutorial down. Never keep ticking a hidden panel: it would
+        // own the router stack and swallow every keypress.
+        if (!IsOpen) { Close(); return; }
         _nav.Tick();
     }
+
+    // Deactivate no-ops unless we're the handler on top, so this is safe to call from any hide path.
+    private void Close() => _router.Deactivate(this);
 
     private void BuildNav()
     {
@@ -143,12 +152,12 @@ internal sealed class FTUEBattleIntroScreen : IScreenHandler
         }
         _nav.SetItems(items);
         // Visual layout in the prefab is PLAY on top (large, full width) with SKIP THIS and
-        // SKIP ALL side by side below it. The natural reading flow is vertical (primary
-        // action → secondary → most-destructive), so we override the auto-detected axes to
-        // pin nav to Up/Down arrows. Tab is intentionally disabled — arrow nav is enough
-        // and reserving Tab keeps it consistent with screens that genuinely use it.
-        _nav.AllowVertical = true;
-        _nav.AllowHorizontal = false;
+        // SKIP ALL side by side below it. That block is far wider than it is tall, so the
+        // bounding-box auto-detect reads it as a horizontal strip; the natural reading flow is
+        // vertical (primary action → secondary → most-destructive), so force a flat list.
+        // Tab is intentionally disabled — arrow nav is enough and reserving Tab keeps it
+        // consistent with screens that genuinely use it.
+        _nav.ForceFlatVertical();
         _nav.AllowTab = false;
     }
 
@@ -171,14 +180,20 @@ internal sealed class FTUEBattleIntroScreen : IScreenHandler
         return (parts?.battleCountText?.CurrentText, parts?.battleText?.CurrentText);
     }
 
-    // FTUEManager.CurrentParts is a private property that lazily resolves between
-    // landscapeParts / portraitParts based on aspect ratio. Read via reflection so we get
-    // the same instance the game itself uses for button.onClick wiring and text updates.
+    // The game's own "is the intro panel showing" flag.
+    private bool IsOpen
+    {
+        get
+        {
+            var canvas = GetCurrentParts()?.battleCanvas;
+            return canvas != null && canvas.activeInHierarchy;
+        }
+    }
+
     private FTUEManagerParts? GetCurrentParts()
     {
-        if (_manager == null) return null;
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
-        var pi = typeof(FTUEManager).GetProperty("CurrentParts", flags);
-        return pi?.GetValue(_manager) as FTUEManagerParts;
+        var manager = FTUEManager.instance;
+        if (manager == null || CurrentPartsGetter == null) return null;
+        return CurrentPartsGetter.Invoke(manager, null) as FTUEManagerParts;
     }
 }

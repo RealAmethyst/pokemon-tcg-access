@@ -145,7 +145,7 @@ internal sealed class FriendsPanelScreen : IScreenHandler
 
     public void Tick()
     {
-        if (_hub == null) { if (_active) { _active = false; _router.Deactivate(this); } return; }
+        if (_hub == null) { _active = false; _router.Deactivate(this); return; }
         if (!Application.isFocused) return;
 
         // The panel slid back out (our Escape's close tween, the X, or a flow that closes it) — leave.

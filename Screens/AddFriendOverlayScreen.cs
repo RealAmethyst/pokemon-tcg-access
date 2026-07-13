@@ -98,7 +98,7 @@ internal sealed class AddFriendOverlayScreen : IScreenHandler
     {
         if (!_open || !IsVisible(_overlay))
         {
-            if (_active) { _active = false; _open = false; _router.Deactivate(this); }
+            _active = false; _open = false; _router.Deactivate(this);
             return;
         }
         if (!Application.isFocused) return;

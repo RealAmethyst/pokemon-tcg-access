@@ -29,10 +29,33 @@ internal sealed class DialogueScreen : IScreenHandler
     private static DialogueScreen? _instance;
 
     private readonly ScreenRouter _router;
-    private DialogueManager? _manager;
-    private bool _active;
     private string _lastSpoken = string.Empty;
     private Selectable? _lastFocusAnnounced;
+
+    // The game's own "a dialogue is showing" flag. StartDialogue sets currentDialogue; HideDialogue
+    // nulls it. No mirror of our own — an `_active` bool that says "I'm on the router stack" WILL
+    // desync, because ScreenRouter.Deactivate only pops the TOP handler. HideDialogue fires whenever
+    // the game likes, including while we're paused beneath an overlay (measured: the tutorial closed
+    // its bubble at 12:47:49.618 with the reward popup on top of us). The old code cleared `_active`
+    // and `_manager` anyway, so the refused Deactivate left this handler on the stack with
+    // `_manager == null && !_active` — and Tick's `if (_manager == null) { if (_active) …; return; }`
+    // then returned without ever popping. Once the overlay closed we resumed onto a dead dialogue,
+    // owned the stack, swallowed every key, and the screen underneath never came back.
+    private static readonly FieldInfo? CurrentDialogueField =
+        AccessTools.Field(typeof(DialogueManager), "currentDialogue");
+
+    private static DialogueManager? Manager => DialogueManager.instance;
+
+    private static bool IsOpen
+    {
+        get
+        {
+            var m = Manager;
+            return m != null && CurrentDialogueField?.GetValue(m) != null;
+        }
+    }
+
+    private bool IsActiveHandler => ReferenceEquals(_router.Active, this);
 
     public string Name => "Dialogue";
 
@@ -61,54 +84,40 @@ internal sealed class DialogueScreen : IScreenHandler
         Log.Info("DialogueScreen installed");
     }
 
-    private static void SetSpeaker_Postfix(DialogueManager __instance)
+    private static void SetSpeaker_Postfix()
     {
-        if (_instance == null) return;
-        _instance._manager = __instance;
-        if (!_instance._active)
-        {
-            _instance._active = true;
-            _instance._router.Activate(_instance);
-        }
-        else
-        {
-            _instance.AnnounceCurrent();
-        }
+        if (_instance == null || !IsOpen) return;
+        if (_instance.IsActiveHandler) _instance.AnnounceCurrent();
+        else _instance._router.Activate(_instance);   // → OnEnter, or OnResume if we're already in the stack
     }
 
-    private static void HideDialogue_Postfix(DialogueManager __instance)
+    private static void HideDialogue_Postfix() => _instance?.Close();
+
+    // Deactivate no-ops unless we're the handler on top, so this is safe from any hide path. When the
+    // game hides the bubble underneath an overlay, Tick's backstop pops us the moment we're on top again.
+    private void Close()
     {
-        if (_instance == null || _instance._manager != __instance) return;
-        if (!_instance._active) return;
-        _instance._active = false;
-        _instance._router.Deactivate(_instance);
-        _instance._manager = null;
-        _instance._lastSpoken = string.Empty;
-        _instance._lastFocusAnnounced = null;
+        _lastSpoken = string.Empty;
+        _lastFocusAnnounced = null;
+        _router.Deactivate(this);
     }
 
     public void OnEnter() => AnnounceCurrent();
-    public void OnResume() => AnnounceCurrent();
-    public void OnExit() { /* preserve _manager */ }
+    public void OnResume() { if (IsOpen) AnnounceCurrent(); }   // resumed onto a dead bubble → Tick pops us
+    public void OnExit() { }
     public void RespeakAll() => AnnounceCurrent();
 
     public string StateSignature()
     {
-        if (_manager == null) return "Dialogue|dead";
+        if (!IsOpen) return "Dialogue|dead";
         return $"Dialogue|{ReadCurrentText() ?? string.Empty}";
     }
 
     public void Tick()
     {
-        if (_manager == null)
-        {
-            if (_active)
-            {
-                _active = false;
-                _router.Deactivate(this);
-            }
-            return;
-        }
+        // The bubble is gone — possibly hidden long ago, while an overlay sat on top of us and our
+        // Deactivate was refused. Let go now that we're the top handler.
+        if (!IsOpen) { Close(); return; }
         if (!Application.isFocused) return;
 
         // Coaching-bubble case: an FTUE bubble shown ALONGSIDE a highlighted action button
@@ -135,8 +144,10 @@ internal sealed class DialogueScreen : IScreenHandler
              || UnityEngine.Input.GetKeyDown(KeyCode.Space))
             {
                 focus!.Select();
+                // Fire what the tutorial listens on — see FTUEHook.FocusedElement. A coached Toggle is a
+                // tab: select it, never flip it back off.
                 if (focus is Button btn) btn.onClick?.Invoke();
-                else if (focus is Toggle tog) tog.isOn = !tog.isOn;
+                else if (focus is Toggle tog && !tog.isOn) tog.isOn = true;
             }
             return;
         }
@@ -154,8 +165,8 @@ internal sealed class DialogueScreen : IScreenHandler
             // Null-conditional both calls: the first NextSpeaker can trigger HideDialogue at
             // the end of a chain, which fires our HideDialogue_Postfix and nulls _manager.
             // Without the guard the second call would NRE.
-            _manager?.NextSpeaker();
-            _manager?.NextSpeaker();
+            Manager?.NextSpeaker();
+            Manager?.NextSpeaker();
         }
     }
 
@@ -169,11 +180,12 @@ internal sealed class DialogueScreen : IScreenHandler
     // for coaching bubbles (exitCondition=false) that stay until the player performs a highlighted
     // action. Read from the game's own flag. Defaults to true if unreadable, so we never hijack
     // Enter away from a normal advanceable dialogue.
-    private bool DialogueAdvanceable()
+    private static bool DialogueAdvanceable()
     {
-        if (_manager == null) return true;
+        var m = Manager;
+        if (m == null) return true;
         var f = typeof(DialogueManager).GetField("hasExitCondition", BindingFlags.Instance | BindingFlags.NonPublic);
-        return f?.GetValue(_manager) is bool b ? b : true;
+        return f?.GetValue(m) is bool b ? b : true;
     }
 
     private void AnnounceCurrent()
@@ -185,10 +197,11 @@ internal sealed class DialogueScreen : IScreenHandler
         _router.Speech.Say(text!, interrupt: true);
     }
 
-    private string? ReadCurrentText()
+    private static string? ReadCurrentText()
     {
-        if (_manager == null) return null;
+        var m = Manager;
+        if (m == null) return null;
         var field = typeof(DialogueManager).GetField("currentText", BindingFlags.Instance | BindingFlags.NonPublic);
-        return field?.GetValue(_manager) as string;
+        return field?.GetValue(m) as string;
     }
 }

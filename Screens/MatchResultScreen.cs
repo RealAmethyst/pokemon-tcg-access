@@ -43,6 +43,7 @@ internal sealed class MatchResultScreen : IScreenHandler
     private string _outcome = "";
     private bool _onStatsPage;
     private string _lastStatsButtonSig = "";
+    private bool _returnAnnounced;
 
     private static FieldInfo? _returnButtonField;
 
@@ -111,7 +112,32 @@ internal sealed class MatchResultScreen : IScreenHandler
         if (!string.IsNullOrWhiteSpace(line)) _router.Speech.Say(line, interrupt: true);
         RebuildStatsButtons();
         _lastStatsButtonSig = StatsButtonSig();
-        if (_statsNav.Count > 0) _statsNav.FocusFirst(announce: true, interruptPrior: string.IsNullOrWhiteSpace(line));
+        if (_statsNav.Count > 0) FocusStatsDefault(interruptPrior: string.IsNullOrWhiteSpace(line));
+    }
+
+    // Land on the SAFE button — the last one (the result screen's primary "move on": Continue / Close)
+    // — and never on Add Friend. Focus first landing on Add Friend let an Enter fire a friend request
+    // at the opponent by accident (Amethyst's call). Add Friend stays reachable by arrowing up.
+    private void FocusStatsDefault(bool interruptPrior)
+    {
+        if (_statsNav.Count == 0) return;
+        var addFriend = AddFriendButton();
+        int target = _statsNav.Count - 1;
+        while (target > 0 && ReferenceEquals(_statsNav.Items[target], addFriend)) target--;
+        _statsNav.FocusIndex(target, announce: true, interrupt: interruptPrior);
+    }
+
+    // The "send friend request" button on the stats page (AddFriendFromMatchResults._sendRequestButton),
+    // so the default focus can avoid it.
+    private Button? AddFriendButton()
+    {
+        if (_overlay == null) return null;
+        try
+        {
+            var comp = _overlay.GetComponentInChildren<AddFriendFromMatchResults>(includeInactive: true);
+            return comp != null ? ReadField<Button>(comp, "_sendRequestButton") : null;
+        }
+        catch { return null; }
     }
 
     private string StatsAnnouncement(MatchResultsStats stats)
@@ -273,6 +299,7 @@ internal sealed class MatchResultScreen : IScreenHandler
     private void OnShow(MatchResultsScreenOverlay overlay, bool won, string gameEndReasonLocID)
     {
         _overlay = overlay;
+        _returnAnnounced = false;
         var reason = LocalizationHook.Get(gameEndReasonLocID);
         _outcome = won ? "You won." : "You lost.";
         if (!string.IsNullOrWhiteSpace(reason)) _outcome += " " + reason;
@@ -294,7 +321,7 @@ internal sealed class MatchResultScreen : IScreenHandler
         // The overlay lives on the Match scene; when it unloads (return to menu) the reference dies.
         if (_overlay == null || _overlay.gameObject == null)
         {
-            if (_active) { _active = false; _router.Deactivate(this); }
+            _active = false; _router.Deactivate(this);
             return;
         }
         if (!Application.isFocused) return;
@@ -309,12 +336,20 @@ internal sealed class MatchResultScreen : IScreenHandler
                 bool hadNone = _statsNav.Count == 0;
                 _lastStatsButtonSig = sig;
                 RebuildStatsButtons();
-                if (hadNone && _statsNav.Count > 0) _statsNav.FocusFirst(announce: true, interruptPrior: true);
+                if (hadNone && _statsNav.Count > 0) FocusStatsDefault(interruptPrior: true);
                 return;
             }
             _statsNav.Tick();
             return;
         }
+
+        // When the return-to-game button appears (rewards / final page), announce it once by its real
+        // label so the player hears the result is over and what advances — instead of pressing blind and
+        // only getting feedback after. Enter still advances through the game's own flow (Advance).
+        var rb = ReturnButton(_overlay);
+        bool rbAvail = rb != null && rb.isActiveAndEnabled && rb.IsInteractable();
+        if (rbAvail && !_returnAnnounced) { _returnAnnounced = true; _router.Speech.Say(Navigation.KeyboardNavigator.DefaultLabel(rb!), interrupt: false); }
+        else if (!rbAvail) _returnAnnounced = false;
 
         // Other stages (win/loss splash, victor catchphrase, rewards) advance on the game's own tap flag.
         if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter)
@@ -333,7 +368,8 @@ internal sealed class MatchResultScreen : IScreenHandler
             var btn = ReturnButton(_overlay);
             if (btn != null && btn.isActiveAndEnabled && btn.IsInteractable())
             {
-                _router.Speech.Say("Returning to menu", interrupt: true);
+                // No speech here: the button was already announced when it appeared, and pressing it
+                // transitions to the HUB (which announces itself). Speaking only on press was the bug.
                 btn.onClick.Invoke();
                 return;
             }

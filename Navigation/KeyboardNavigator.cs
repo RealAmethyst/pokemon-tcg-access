@@ -55,12 +55,31 @@ internal sealed class KeyboardNavigator : INavSection
     // ("checked/unchecked") reads wrong for a tab strip.
     public bool RadioToggleMode { get; set; } = false;
 
-    // For grid layouts. Up/Down moves by Columns items at a time; Left/Right by 1. Auto-
-    // computed in SetItems from item positions (count of items in the first row). Defaults
-    // to 1 so a flat list behaves identically to before. For single-row horizontal layouts
-    // Columns equals the row length, which means Up/Down jumps out of bounds and is a no-op
-    // (correct behaviour — vertical doesn't apply to a horizontal strip).
-    public int Columns { get; private set; } = 1;
+    // Column count of the item grid as measured from screen positions in SetItems. Only
+    // consulted when both axes are live (a real grid) — see Columns.
+    private int _detectedColumns = 1;
+
+    // For grid layouts. Up/Down moves by Columns items at a time; Left/Right by 1.
+    //
+    // DERIVED from the axis flags, never stored: a handler is free to override AllowVertical /
+    // AllowHorizontal after SetItems, and Columns must follow, because every move and every
+    // section-escape gate divides by it.
+    //   vertical-only   → 1           (a flat list: Down steps one item)
+    //   horizontal-only → item count  (a single row: Left/Right crosses it, and IsAtTopRow /
+    //                                  IsAtBottomRow are true everywhere so section-escape works)
+    //   both (a grid)   → the measured column count
+    // Freezing it at SetItems time instead silently strands navigation whenever the handler's
+    // chosen axis disagrees with the auto-detected one: a vertical-only override on a wide
+    // button block keeps Columns = count, so Down targets a row that doesn't exist and dies.
+    public int Columns
+    {
+        get
+        {
+            if (AllowHorizontal && !AllowVertical) return Mathf.Max(1, _items.Count);
+            if (AllowVertical && !AllowHorizontal) return 1;
+            return Mathf.Max(1, _detectedColumns);
+        }
+    }
 
     // Escape / Backspace = back. Each popup-type handler wires this to its own dismiss path
     // (SimpleMessage: closeButton.onClick; ModalElementContainer: Close(); OverlayScreenGroup: Deactivate()).
@@ -170,29 +189,29 @@ internal sealed class KeyboardNavigator : INavSection
 
         // Auto-detect orientation from the items' bounding box. Handlers can still override
         // AllowVertical / AllowHorizontal after SetItems if the visual layout doesn't match
-        // how we want to navigate (e.g. a 2-column grid that the user prefers as a flat list).
+        // how we want to navigate (e.g. a 2-column grid that the user prefers as a flat list);
+        // Columns is derived from the flags, so such an override stays coherent.
         if (_items.Count > 1)
         {
             var (vertical, horizontal) = DetectAxes(_items);
             AllowVertical = vertical;
             AllowHorizontal = horizontal;
-            Columns = DetectColumns(_items);
+            _detectedColumns = DetectColumns(_items);
         }
         else
         {
-            Columns = 1;
+            _detectedColumns = 1;
         }
     }
 
     // Force a flat single-column vertical list, overriding the bounding-box auto-detection. Call
     // AFTER SetItems. Use this for menus/panels that are conceptually a simple top-to-bottom list
     // and must have predictable Up/Down through every item — auto-detect can mis-read the axis when
-    // the item set includes an off-to-the-side or full-screen element (e.g. a window X plus an
-    // invisible tap-outside blocker), which strands vertical navigation. Down/Up then step linearly
-    // through every item in reading order, exactly like Tab.
+    // the item set is wider than it is tall (a big primary button above a row of secondary ones) or
+    // includes an off-to-the-side / full-screen element (a window X plus an invisible tap-outside
+    // blocker). Down/Up then step linearly through every item in reading order, exactly like Tab.
     public void ForceFlatVertical()
     {
-        Columns = 1;
         AllowVertical = true;
         AllowHorizontal = false;
     }
@@ -200,12 +219,11 @@ internal sealed class KeyboardNavigator : INavSection
     // Force a flat single-ROW horizontal strip, overriding the bounding-box auto-detection. Call AFTER
     // SetItems. Use for a row of controls that are conceptually one left-to-right strip but sit at
     // slightly different heights (e.g. a screen header: back / info / rewards) — auto-detect would read
-    // them as a 1-column vertical list (Columns=1), and Left/Right (which uses sameRowOnly) then can't
-    // cross "rows", stranding every item but the first. With Columns = item count all items share row 0,
-    // so Left/Right steps through every one in order.
+    // them as a vertical list, and Left/Right (which uses sameRowOnly) then can't cross "rows",
+    // stranding every item but the first. Horizontal-only puts every item in row 0, so Left/Right
+    // steps through them all in order.
     public void ForceFlatHorizontal()
     {
-        Columns = Mathf.Max(1, _items.Count);
         AllowVertical = false;
         AllowHorizontal = true;
     }

@@ -167,7 +167,7 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
 
     public void Tick()
     {
-        if (_overlay == null) { if (_active) { _active = false; _router.Deactivate(this); } return; }
+        if (_overlay == null) { _active = false; _router.Deactivate(this); return; }
         if (!Application.isFocused) return;
 
         if (UnityEngine.Input.GetKeyDown(KeyCode.Escape) || UnityEngine.Input.GetKeyDown(KeyCode.Backspace))

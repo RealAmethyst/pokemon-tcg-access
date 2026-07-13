@@ -180,7 +180,7 @@ internal sealed class HUBExpansionChallengeScreen : IScreenHandler
     {
         if (_controller == null)
         {
-            if (_active) { _active = false; _router.Deactivate(this); }
+            _active = false; _router.Deactivate(this);
             return;
         }
         if (!Application.isFocused) return;
@@ -331,6 +331,8 @@ internal sealed class HUBExpansionChallengeScreen : IScreenHandler
 
         AddGroup(new List<Selectable> { target });
         _activeGroup = 0;
+        // A coached Toggle is a tab, so Enter must SELECT it — see FTUEHook.FocusedElement.
+        _groups[0].RadioToggleMode = target is Toggle;
         _groups[0].FocusFirst(announce: true, interruptPrior: true);
     }
 
@@ -442,12 +444,18 @@ internal sealed class HUBExpansionChallengeScreen : IScreenHandler
         if (_controller == null) return items;
         var scrollerT = _controller.tiers != null && _controller.tiers.Scroller != null ? _controller.tiers.Scroller.transform : null;
         var questTfs = QuestPanels().Where(p => p != null).Select(p => p.transform).ToList();
+        // The level / XP meter (ExpansionChallengeExpController) carries a Button on its group object
+        // but isn't an action — its level + experience are already read in the pass status — so leave
+        // it out of the header section. Identify it structurally as the button wrapping the exp
+        // controller's progress bar; that's never the "(i)" info button we DO want to keep.
+        var expBarT = _controller.exp != null ? _controller.exp.progressBar : null;
         foreach (var b in _controller.GetComponentsInChildren<Button>(includeInactive: false))
         {
             if (b == null || !b.isActiveAndEnabled || !b.IsInteractable()) continue;
             if (known.Contains(b) || b == collectAll) continue;
             if (scrollerT != null && b.transform.IsChildOf(scrollerT)) continue;
             if (questTfs.Any(t => b.transform.IsChildOf(t))) continue;
+            if (expBarT != null && expBarT.IsChildOf(b.transform)) continue;
             items.Add(b);
         }
         return items.OrderBy(s => ReadingOrder(s.transform)).ToList();
@@ -721,6 +729,11 @@ internal sealed class HUBExpansionChallengeScreen : IScreenHandler
     private void OnFtueFocusChanged()
     {
         if (!_active || _controller == null) return;
+        // Paused beneath an overlay: that focus belongs to whatever is on top of us (the reward popup
+        // coaches Btn_Collect), and the overlay's own handler follows it. Adopting it here would leave
+        // this screen's only navigable item pointing at a button that lives on another screen — and one
+        // the FTUE has reparented out from under us. We re-read the focus in OnResume anyway.
+        if (!ReferenceEquals(_router.Active, this)) return;
         if (FTUEHook.FocusedElement == _lastFtueTarget) return;
         if (FTUEHook.FtueIsRunning) RebuildForFtue();
     }

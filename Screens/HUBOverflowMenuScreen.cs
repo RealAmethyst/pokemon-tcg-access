@@ -81,7 +81,7 @@ internal sealed class HUBOverflowMenuScreen : IScreenHandler
 
     public void Tick()
     {
-        if (_controller == null) { if (_active) { _active = false; _router.Deactivate(this); } return; }
+        if (_controller == null) { _active = false; _router.Deactivate(this); return; }
         if (!Application.isFocused) return;
         var ov = _controller.MyOverlayScreenGroup;
         if (ov == null || !ov.gameObject.activeInHierarchy)

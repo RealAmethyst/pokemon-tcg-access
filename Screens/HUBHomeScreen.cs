@@ -224,11 +224,8 @@ internal sealed class HUBHomeScreen : IScreenHandler
     {
         if (_controller == null)
         {
-            if (_active)
-            {
-                _active = false;
-                _router.Deactivate(this);
-            }
+            _active = false;
+            _router.Deactivate(this);   // no-ops unless we're on top
             return;
         }
         if (!Application.isFocused) return;
@@ -529,7 +526,8 @@ internal sealed class HUBHomeScreen : IScreenHandler
         _lastFtueTarget = target;
         if (target == null || !target.isActiveAndEnabled) return;
 
-        AddGroup(new List<Selectable> { target });
+        // A coached Toggle is a tab, so Enter must SELECT it — see FTUEHook.FocusedElement.
+        AddGroup(new List<Selectable> { target }, radioMode: target is Toggle);
         _activeGroup = 0;
         _groups[0].FocusFirst(announce: true, interruptPrior: true);
     }

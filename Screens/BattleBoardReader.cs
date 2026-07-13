@@ -333,7 +333,7 @@ internal static class BattleBoardReader
     }
 
     // Translate an energy-cost letter string (e.g. "RRC") into words ("cost 2 Fire, 1 Colorless").
-    private static string EnergyCostWords(string? cost)
+    internal static string EnergyCostWords(string? cost)
     {
         if (string.IsNullOrEmpty(cost)) return "";
         const string letters = "RGWLPFDMYNC";

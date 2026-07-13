@@ -150,7 +150,7 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
 
     public void Tick()
     {
-        if (_controller == null) { if (_active) { _active = false; _router.Deactivate(this); } return; }
+        if (_controller == null) { _active = false; _router.Deactivate(this); return; }
         if (!Application.isFocused) return;
 
         // Forced tutorial focus (reparented element) — present + drive it; nothing else this tick.

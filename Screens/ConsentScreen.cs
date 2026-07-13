@@ -131,11 +131,8 @@ internal sealed class ConsentScreen : IScreenHandler
     {
         if (_consent == null)
         {
-            if (_active)
-            {
-                _active = false;
-                _router.Deactivate(this);
-            }
+            _active = false;
+            _router.Deactivate(this);   // no-ops unless we're on top
             return;
         }
 
@@ -144,11 +141,8 @@ internal sealed class ConsentScreen : IScreenHandler
         {
             // Consent flow has finished — close the handler. Pol will reopen us if the
             // ConsentFlow ever becomes active again (it doesn't in normal flow, but harmless).
-            if (_active)
-            {
-                _active = false;
-                _router.Deactivate(this);
-            }
+            _active = false;
+            _router.Deactivate(this);   // no-ops unless we're on top
             return;
         }
 

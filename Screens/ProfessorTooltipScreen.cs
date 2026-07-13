@@ -99,11 +99,8 @@ internal sealed class ProfessorTooltipScreen : IScreenHandler
     {
         if (_tooltip == null)
         {
-            if (_active)
-            {
-                _active = false;
-                _router.Deactivate(this);
-            }
+            _active = false;
+            _router.Deactivate(this);   // no-ops unless we're on top
             return;
         }
         if (!Application.isFocused) return;

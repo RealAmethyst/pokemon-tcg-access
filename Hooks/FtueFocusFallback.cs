@@ -44,13 +44,15 @@ internal static class FtueFocusFallback
         if (focus != _shown)
         {
             _shown = focus;
+            // A coached Toggle is a tab, so Enter must SELECT it — see FTUEHook.FocusedElement.
+            _nav.RadioToggleMode = focus is Toggle;
             _nav.SetItems(new List<Selectable> { focus });   // DefaultLabel now resolves friendly names / skips badges
             _nav.FocusFirst(announce: true, interruptPrior: true);
             Log.Info($"FTUE fallback presenting: {focus.gameObject.name}");
         }
 
-        // Enter/Space → onClick.Invoke(); arrows are no-ops on a single item. KeyboardNavigator.Tick
-        // gates on Application.isFocused itself.
+        // Enter/Space → the element's own activation (Button.onClick / Toggle.isOn / submit). Arrows are
+        // no-ops on a single item. KeyboardNavigator.Tick gates on Application.isFocused itself.
         _nav.Tick();
     }
 }

@@ -222,8 +222,8 @@ internal sealed class ModalContainerScreen : IScreenHandler
     //     language/resolution confirms put their body in such an option, and the container scan misses it
     //     for the same under-the-blocker reason. For PASSIVE options (no Selectable on the option root =
     //     not a button/toggle) we take the text directly, ignoring that ancestor filter.
-    //  In every case, if a LocText hasn't pushed to its TMP yet we resolve it from CurrentText / its
-    //  resourceId.
+    //  In every case, if a LocText hasn't pushed to its TMP yet we resolve it from its resourceId, and
+    //  hidden text is never read — see Consider.
     private string BuildBodyText(LocText? titleText)
     {
         if (_modal == null) return "";
@@ -233,6 +233,12 @@ internal sealed class ModalContainerScreen : IScreenHandler
         void Consider(TMP_Text t, bool allowUnderSelectable)
         {
             if (t == null) return;
+            // A hidden text isn't on screen, so it isn't part of the modal's message. The CurrentOptions
+            // pass reaches inactive children by design (it looks for text the option never activated), and
+            // an option routinely hides whole sub-widgets — an AttackOption with no energy cost to show
+            // does energyCostDisplay.SetActive(false). Speaking those would invent content the sighted
+            // player can't see.
+            if (!t.gameObject.activeInHierarchy) return;
             if (titleText != null && t.gameObject == titleText.gameObject) return;
             // Filter BEFORE marking seen: the container pass (allowUnderSelectable:false) rejects a
             // message that sits under the blocker Button, and the CurrentOptions pass must still be able
@@ -242,13 +248,16 @@ internal sealed class ModalContainerScreen : IScreenHandler
             string txt = t.text;
             if (string.IsNullOrWhiteSpace(txt))
             {
+                // The loc id is the only fallback worth trying. NOT LocText.CurrentText: it lives on this
+                // same GameObject, so it returns this very TMP's .text — the empty string we already have —
+                // and when its TMP field is unset it dereferences a `uiText` that only LocText.Initialize()
+                // assigns. On a modal option that was Instantiated this frame and never had text pushed
+                // into it, both fields are null and the getter throws. That NRE unwound out of OnEnter,
+                // through ModalElementContainer.Open, and killed the match coroutine that was opening the
+                // overlay (see ScreenRouter's class comment).
                 var loc = t.GetComponent<LocText>();
-                if (loc != null)
-                {
-                    txt = loc.CurrentText;
-                    if (string.IsNullOrWhiteSpace(txt) && !string.IsNullOrEmpty(loc.resourceId))
-                        txt = LocalizationHook.Get(loc.resourceId) ?? "";
-                }
+                if (loc != null && !string.IsNullOrEmpty(loc.resourceId))
+                    txt = LocalizationHook.Get(loc.resourceId) ?? "";
             }
             if (!string.IsNullOrWhiteSpace(txt)) parts.Add((ReadingOrder(t.transform), txt.Trim()));
         }
