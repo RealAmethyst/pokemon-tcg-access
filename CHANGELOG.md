@@ -1,4 +1,5 @@
 ## Features
+- the settings screen now speaks every switch the same way. The windowed, card hover and reduced effects switches read "on" and "off" like the accessibility ones do, using the game's own wording rather than the mod's, so they also follow your game language
 - the settings screen works again, and now covers the game's new accessibility options. The August update replaced settings with a tabbed screen — Accessibility and General — and the mod was still reading the old one, which the game had switched off, so the screen was silent and you could get stuck in it. It now reads the tab strip and whichever tab you're in: sound, video and language under General, and under Accessibility the four options for reducing motion and visual effects (game board animations, card foil animations, front-end effects and battle effects), each with its name, description and current value
 - updated for the game's July and August updates — every screen the mod touches was re-checked against the new game code, twice
 - The game updater app is now also accessible.

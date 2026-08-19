@@ -990,7 +990,11 @@ internal sealed class HUBSettingsScreen : IScreenHandler
     private static int Pct(Slider slider)
         => Mathf.RoundToInt(Mathf.InverseLerp(slider.minValue, slider.maxValue, slider.value) * 100f);
 
-    private static string State(Toggle toggle) => toggle.isOn ? "checked" : "unchecked";
+    // The game's own words for a two-state setting (common_on / common_off), so these rows read the
+    // same as the Accessibility ones and localize with the client. Deliberately not "checked" /
+    // "unchecked": these are settings switches rather than form checkboxes, and the game already
+    // names their states — no reason to speak mod English over the client's own text.
+    private static string State(Toggle toggle) => Loc(BoolSettingBase.GetToggleLabel(toggle.isOn));
     private static bool Active(Selectable? selectable) => selectable != null && selectable.isActiveAndEnabled;
 
     private static string Loc(string? id)
