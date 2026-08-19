@@ -127,6 +127,40 @@ internal static class FTUEHook
         }
     }
 
+    // ── The game's own per-match FTUE switch ─────────────────────────────────────────────────────
+    // FTUEMatchManager.Start installs its permit delegates on the match's CardTargetingHandler when
+    // (and only when) the FTUE governs that match — the exact rules that restrict a sighted player's
+    // clicks and drags there. Battle-context FTUE logic must mirror THIS installation, never the
+    // global lesson flag: FTUEManager.IsFtueRunning is GuidedBehaviorSet.RunningStrategy.IsRunning,
+    // which stays true for parked lessons and always-running behavior sets (AlwaysRunningStrategy
+    // exists) right through a normal ranked match — and FTUEMatchManager.Instance exists in normal
+    // matches too. Gating on those two locked a ranked player out of every action with "the tutorial
+    // isn't ready for that yet" (field report, root-caused 2026-07-23).
+    //
+    // MatchFtuePermit returns the installed targetability permit itself, so callers both detect
+    // governance (non-null) and evaluate a card through the game's own rule in one step.
+    public static Func<TPCI.Rainier.Match.Cards.Card3D, bool>? MatchFtuePermit(MatchManager? mgr)
+    {
+        try { return mgr != null ? mgr.TargetingHandler.SecondaryIsCardTargetable : null; }
+        catch { return null; }
+    }
+
+    public static bool FtueGovernsMatch(MatchManager? mgr) => MatchFtuePermit(mgr) != null;
+
+    // An FTUEDragDamage coach is mid-flight: it focuses the exact tray counter it wants dropped
+    // (GetDamageCards()[counterPos]) and waits for THAT instance to clear. Battle damage drops defer to
+    // the focused counter only while this is true — a reparent step without this coach (and every normal
+    // match) must never wait on a focus that will not come.
+    public static bool DragDamageCoachActive
+    {
+        get
+        {
+            for (int i = 0; i < _trackedStates.Count; i++)
+                if (_trackedStates[i] is global::FTUEDragDamage) return true;
+            return false;
+        }
+    }
+
     // Deck-editor tutorial target. FTUEDeckEditorIndicator highlights a specific card (its focused
     // element — the count badge / card button — is reparented under a Blocker, so we can't walk to
     // its CardStubParts). But the indicator itself carries the target card id + element type, so the
@@ -199,7 +233,22 @@ internal static class FTUEHook
         if (removeState != null)
             harmony.Patch(removeState, postfix: new HarmonyMethod(AccessTools.Method(typeof(FTUEHook), nameof(RemoveState_Postfix))));
 
+        // ForceRestartFTUEFromStart clears the game's state list DIRECTLY (`_currentRunningStates
+        // .Clear()`), bypassing the per-state Remove we mirror — clear our mirror with it so the
+        // tracked-state accessors (DragDamageCoachActive, FtueSpeechClaimingStateActive, …) can't go
+        // stale across an abnormal tutorial restart. (It's a coroutine, so this postfix fires at
+        // enumerator creation, slightly before the game's own clear — well-behaved state exits still
+        // come through RemoveState_Postfix, and no coached input matters mid-restart.)
+        var forceRestart = AccessTools.Method(typeof(FTUEManager), nameof(FTUEManager.ForceRestartFTUEFromStart));
+        if (forceRestart != null)
+            harmony.Patch(forceRestart, postfix: new HarmonyMethod(AccessTools.Method(typeof(FTUEHook), nameof(ForceRestart_Postfix))));
+
         Log.Info("FTUEHook installed");
+    }
+
+    private static void ForceRestart_Postfix()
+    {
+        _trackedStates.Clear();
     }
 
     private static void PreviousElement_Postfix(MenuButtonController __instance)

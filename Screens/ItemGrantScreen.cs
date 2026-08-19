@@ -280,15 +280,51 @@ internal sealed class ItemGrantScreen : IScreenHandler
 
     private void TickBooster(ContentItemRewardController_Booster booster)
     {
-        if (!ReferenceEquals(booster, _booster)) { _booster = booster; _boosterState = int.MinValue; _shown = booster; _lineIndex = -1; }
+        if (!ReferenceEquals(booster, _booster)) { _booster = booster; _boosterState = int.MinValue; _shown = booster; _lineIndex = -1; _lines = new List<string>(); _focus = 0; }
 
         int state = BoosterState(booster);
         if (state != _boosterState)
         {
             _boosterState = state;
             _lineIndex = -1;
-            if (state <= 0) _router.Speech.Say($"Opening pack, {booster.numberOfCards} cards", interrupt: true);
+            _focus = 0;
+            if (state <= 0)
+            {
+                // Sealed pack: no card is on screen, so no detail lines. Without this clear, Down/Up
+                // kept reading the PREVIOUS pack's last card — the card was gone but its stats weren't
+                // (reported 2026-07-23: "a new pack was about to be opened but moving down would speak
+                // the stats from the last pokemon").
+                _lines = new List<string>();
+                _router.Speech.Say(SealedPackText(booster), interrupt: true);
+            }
             else AnnounceBoosterCard(booster, state - 1, interrupt: true);
+        }
+
+        // Same Left/Right focus model as the one-reward flow: the pack/card, or the Collect All
+        // button. The game keeps Collect All active and clickable right through a pack reveal
+        // (ContentItemGrantingOverlay.Activate shows it; OnClickCollectAll works until the final
+        // tally) — a sighted player can bail out of a long reveal at any card, so we must too.
+        bool hasCollectAll = _overlay!.collectAllButton != null && _overlay.collectAllButton.isActiveAndEnabled;
+        if (UnityEngine.Input.GetKeyDown(KeyCode.LeftArrow))
+        {
+            if (_focus != 0)
+            {
+                _focus = 0; _lineIndex = -1;
+                if (_boosterState <= 0) _router.Speech.Say(SealedPackText(booster), interrupt: true);
+                else AnnounceBoosterCard(booster, _boosterState - 1, interrupt: true);
+            }
+            return;
+        }
+        if (UnityEngine.Input.GetKeyDown(KeyCode.RightArrow))
+        {
+            if (hasCollectAll && _focus != 1) { _focus = 1; _router.Speech.Say(CollectAllLabel(), interrupt: true); }
+            return;
+        }
+        if (_focus == 1)
+        {
+            if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter))
+                CollectAll();
+            return;
         }
 
         // Down/Up walk the current card's detail lines; Enter reveals the next card (or finishes the pack).
@@ -306,6 +342,40 @@ internal sealed class ItemGrantScreen : IScreenHandler
         {
             AdvanceBooster(booster);   // step the real 3D pack to the next card (its own tap handler)
         }
+    }
+
+    // The sealed-pack screen, spoken as it reads: "Mega Evolution—Pitch Black Booster Pack, 10 cards.
+    // Packs left: 3." Title and packs-left are the game's own texts (no invented "Opening" — the
+    // screen doesn't say it, and nothing has opened yet; Amethyst 2026-07-23); the card count is the
+    // one mod-added orientation fact.
+    private string SealedPackText(ContentItemRewardController_Booster booster)
+    {
+        var parts = new List<string> { $"{PackName(booster) ?? "Pack"}, {booster.numberOfCards} cards" };
+        var ui = ReadField<Component>(booster, "ui");
+        var footer = ui != null ? TmpOf(ReadField<Component>(ui, "footerTxt")) : null;
+        if (!string.IsNullOrWhiteSpace(footer) && !footer!.Contains("(Missing)")) parts.Add(footer.Trim());
+        return string.Join(". ", parts);
+    }
+
+    private string? PackName(ContentItemRewardController_Booster booster)
+    {
+        var granted = ReadField<GrantedItem>(booster, "itemData");
+        var name = LocOf(granted?.clientId);
+        if (name != null) return name;
+        var ui = ReadField<Component>(booster, "ui");
+        var shown = ui != null ? TmpOf(ReadField<Component>(ui, "titleTxt")) : null;
+        return !string.IsNullOrWhiteSpace(shown) && !shown!.Contains("(Missing)") ? shown.Trim() : null;
+    }
+
+    private static string? LocOf(string? id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        try
+        {
+            var s = TPCI.Localization.LocalizationManager.Instance?.GetString(id);
+            return string.IsNullOrWhiteSpace(s) || s!.Contains("(Missing)") ? null : s!.Trim();
+        }
+        catch { return null; }
     }
 
     private void AnnounceBoosterCard(ContentItemRewardController_Booster booster, int index, bool interrupt)

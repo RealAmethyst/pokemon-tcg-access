@@ -93,12 +93,20 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private string? _attachEnergyName;   // attach menu phase 2: which energy type the player chose to place
     private ReparentDamageMenu? _damageMenu;
     private DamageSelection? _damageSel;
-    private ReparentDamageConstraintEvaluator? _damageEval;   // the game's own validity authority (read-only)
+    // The MENU'S OWN constraint evaluator, read by reflection — never constructed. Its constructor runs
+    // InitializeFinalDamageToCurrent, which resets newDamageCounters = currentDamageCounters on the SHARED
+    // DamageSelectionFinal objects — erasing every drop already recorded on the payload the game submits.
+    // Constructing "read-only copies" per drop is exactly how Phantom Dive / Adrena-Brain lost counters:
+    // visuals showed every drop, but SelectInput sent only the last one.
+    private ReparentDamageConstraintEvaluator? _damageEval;
     private string? _damageSource;    // MOVE: the source Pokémon currently distributing (null = pick-source phase, or put-new-damage)
     private bool _damageSourceStarted; // have we lifted the chosen source's counters into the tray yet (first-drop trigger)
-    private int _damageDropWait;      // frames spent waiting for a tray counter to spawn / the coach to focus one
-    private bool _damageDropApplied;  // the game's ReactToSuccessfulPlacement fired → next Tick rebuilds off the committed state
     private string _damageTargetEid = "";
+    private bool _damageDropLanded;   // ReactToSuccessfulPlacement ran for the armed drop (discriminates silent refusal)
+    private bool _damageDropInFlight; // an armed drop whose placement loop hasn't reported back yet
+    private Action? _damageRetry;     // a drop held until the game is ready — completed by the coach-focus /
+                                      // unblock / server-confirm EVENTS below, never by frame counting
+    private bool _damagePlacementEndedHooked;   // OnPlacementEvaluationEnded subscribed for this prompt
     private readonly KbPlacementInitiator _damageInit = new();   // explicit-commit placement for a damage counter → target
     private readonly KbPlacementInitiator _attachInit = new();   // explicit-commit placement for attach-to-chosen-target
     private bool _attachHolding;
@@ -128,24 +136,82 @@ internal sealed class BattlePromptScreen : IScreenHandler
         harmony.Patch(target, postfix: new HarmonyMethod(
             AccessTools.Method(typeof(BattlePromptScreen), nameof(RunSelectionRequest_Postfix))));
 
-        // The game's own "a damage counter just landed" event — we rebuild our options off THIS (after the
-        // counter is applied), not off a same-frame guess, so Done/target validity reflect the committed state.
+        // The game's own "a damage counter just landed" callback — announce and rebuild HERE, the same
+        // moment the game itself refreshes its click overrides. No flag, no next-frame deferral.
         var reactDrop = AccessTools.Method(typeof(ReparentDamageMenu), nameof(ReparentDamageMenu.ReactToSuccessfulPlacement));
         if (reactDrop != null)
             harmony.Patch(reactDrop, postfix: new HarmonyMethod(
                 AccessTools.Method(typeof(BattlePromptScreen), nameof(ReactToSuccessfulPlacement_Postfix))));
         else Log.Error("BattlePromptScreen: ReparentDamageMenu.ReactToSuccessfulPlacement not found");
 
+        // Tutorial drag coach (FTUEDragDamage): DragDamageBlockCards is the exact moment the coach focuses
+        // the tray counter it wants dropped — a drop the player already asked for completes right here.
+        var dragBlock = AccessTools.Method(typeof(FTUEMatchManager), nameof(FTUEMatchManager.DragDamageBlockCards));
+        if (dragBlock != null)
+            harmony.Patch(dragBlock, postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(BattlePromptScreen), nameof(DragDamageBlockCards_Postfix))));
+        else Log.Warn("BattlePromptScreen: FTUEMatchManager.DragDamageBlockCards not found — tutorial damage drops rely on the unblock hook");
+
+        // The focused counter becomes grabbable when its FocusCard coroutine clears blockDrag —
+        // FocusBlockDrag(false) is that exact moment. Completes a drop held on targetability.
+        var focusBlock = AccessTools.Method(typeof(Card3D), nameof(Card3D.FocusBlockDrag));
+        if (focusBlock != null)
+            harmony.Patch(focusBlock, postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(BattlePromptScreen), nameof(FocusBlockDrag_Postfix))));
+        else Log.Warn("BattlePromptScreen: Card3D.FocusBlockDrag not found — tutorial damage drops rely on the coach hook");
+
+        // Repeatable / unlimited damage effects: after each drop the menu locks itself and waits for the
+        // server echo (isWaitingForUpdate); UnlimitedConfirm is the game re-opening for the next counter.
+        var unlimited = AccessTools.Method(typeof(ReparentDamageMenu), "UnlimitedConfirm");
+        if (unlimited != null)
+            harmony.Patch(unlimited, postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(BattlePromptScreen), nameof(UnlimitedConfirm_Postfix))));
+        else Log.Warn("BattlePromptScreen: ReparentDamageMenu.UnlimitedConfirm not found — repeatable damage effects won't re-announce");
+
         Log.Info("BattlePromptScreen installed");
     }
 
-    // Runs inside the game's placement callback (main thread) the frame the counter is applied. Only flip a
-    // flag — a throw here would unwind into the match's own stack (see feedback_exceptions_unwind_into_game).
-    // The next Tick reads the flag and rebuilds from the now-updated DamageSelection.
-    private static void ReactToSuccessfulPlacement_Postfix(ReparentDamageMenu __instance)
+    // Runs inside the game's placement callback (main thread) the instant a counter is applied. Everything
+    // is try-wrapped — a throw here would unwind into the match's own stack (feedback_exceptions_unwind_into_game).
+    private static void ReactToSuccessfulPlacement_Postfix(ReparentDamageMenu __instance, Card3D placedDamage, ICardPlacementReceiver receiver)
     {
-        if (_instance == null || !ReferenceEquals(__instance, _instance._damageMenu)) return;
-        _instance._damageDropApplied = true;
+        var s = _instance;
+        if (s == null || !ReferenceEquals(__instance, s._damageMenu)) return;
+        s._damageDropLanded = true;
+        s._damageDropInFlight = false;
+        try { s.AfterDamageDropApplied(receiver); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: damage drop follow-up threw: {ex.Message}"); }
+    }
+
+    private static void DragDamageBlockCards_Postfix()
+    {
+        var s = _instance;
+        if (s == null || s._damageMenu == null) return;
+        s.CompleteDamageRetry();   // the coach just focused the counter it wants dropped
+    }
+
+    private static void FocusBlockDrag_Postfix(Card3D __instance, bool state)
+    {
+        var s = _instance;
+        if (s == null || state || s._damageMenu == null || s._damageRetry == null) return;
+        bool isTrayCounter;
+        try { isTrayCounter = s.TrayCounters().Contains(__instance); } catch { return; }
+        if (isTrayCounter) s.CompleteDamageRetry();   // the game just freed the counter for grabbing
+    }
+
+    private static void UnlimitedConfirm_Postfix(ReparentDamageMenu __instance)
+    {
+        var s = _instance;
+        if (s == null || !ReferenceEquals(__instance, s._damageMenu)) return;
+        try
+        {
+            if (!s.IsPromptOpen()) return;
+            s.RebuildDamageOptions();
+            s._idx = 0; s._line = -1; s._lines = null;
+            s._router.Speech.Say("Ready for the next counter", interrupt: true);
+            if (s._options.Count > 0) s.SpeakOption(s._idx, interrupt: false);
+        }
+        catch (Exception ex) { Log.Error($"BattlePrompt: unlimited-confirm follow-up threw: {ex.Message}"); }
     }
 
     private static void RunSelectionRequest_Postfix(PlayerSelection selectionRequest, ISelectionRequestHandler __result)
@@ -249,12 +315,15 @@ internal sealed class BattlePromptScreen : IScreenHandler
         _dragGroup = null;
         _attachMenu = null;
         _reparentSel = null;
+        UnhookDamagePlacementEnded();
         _damageMenu = null;
         _damageSel = null;
         _damageEval = null;
         _damageSource = null;
         _damageSourceStarted = false;
-        _damageDropApplied = false;
+        _damageDropLanded = false;
+        _damageDropInFlight = false;
+        _damageRetry = null;
         _damageTargetEid = "";
         _damageInit.Reset();
         _attachHolding = false;
@@ -1254,7 +1323,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
         {
             try { _mgr.TargetingHandler?.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt attach refresh threw: {ex.Message}"); }
             var receivers = _attachMenu.ValidPlacementReceivers(energy).Select(r => r as Card3D).Where(c => c != null).Select(c => c!);
-            if (FTUEHook.FtueIsRunning && FTUEMatchManager.Instance != null) receivers = receivers.Where(SafeFtuePermits);
+            if (FTUEHook.FtueGovernsMatch(_mgr) && FTUEMatchManager.Instance != null) receivers = receivers.Where(SafeFtuePermits);
             foreach (var r in receivers)
             {
                 var eid = r.entityID;
@@ -1393,15 +1462,33 @@ internal sealed class BattlePromptScreen : IScreenHandler
     // amount moved — the game breaks the total into counters; we drop them one at a time. The evaluator only
     // TELLS us which sources/targets are valid and when the minimum is met; the drop does the real work.
 
+    // The menu's own private state, read (never written, never re-created) so our reads and the game's
+    // submit payload are always the same object graph.
+    private static readonly FieldInfo? DamageEvaluatorField = AccessTools.Field(typeof(ReparentDamageMenu), "constraintEvaluator");
+    private static readonly FieldInfo? DamageWaitingField = AccessTools.Field(typeof(ReparentDamageMenu), "isWaitingForUpdate");
+
     private void BuildDamageOptions(ReparentDamageMenu menu, DamageSelection ds)
     {
         _damageMenu = menu;
         _damageSel = ds;
-        _damageEval = new ReparentDamageConstraintEvaluator(ds);   // read-only: which sources/targets are valid
+        _damageEval = DamageEvaluatorField?.GetValue(menu) as ReparentDamageConstraintEvaluator;
+        if (_damageEval == null)
+            Log.Error("BattlePrompt: couldn't read ReparentDamageMenu.constraintEvaluator — damage options unavailable");
         _damageSource = null;
         _damageSourceStarted = false;
-        _damageDropWait = 0;
-        _damageDropApplied = false;
+        _damageDropLanded = false;
+        _damageDropInFlight = false;
+        _damageRetry = null;
+        // The menu auto-clicks a LONE eligible source before our postfix runs (SetupSelectableCards'
+        // single-source branch), so distribution can already be live here. Adopt that source — the
+        // evaluator excludes an active distributor from GetCardsWithDistributableDamage, so re-listing
+        // would offer an empty source list and dead-end the prompt (Codex review finding, 2026-07-23).
+        // Deliberately NOT marking it started: the first drop still runs EnsureDamageSourceDistributing,
+        // whose already-distributing branch re-fires the coach event the tutorial missed at auto-start.
+        var activeSource = CurrentDamageSourceId();
+        if (ds.fromDamageSelections.Count > 0 && !string.IsNullOrEmpty(activeSource) && activeSource != "NewDC")
+            _damageSource = activeSource;
+        HookDamagePlacementEnded();
         _target = 0;
         RebuildDamageOptions();
         if (string.IsNullOrWhiteSpace(_question))
@@ -1423,7 +1510,10 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     private void BuildDamageSourceOptions()
     {
-        var sources = _damageEval!.GetCardsWithDistributableDamage(null).Distinct().ToList();
+        if (_damageEval == null) return;
+        // Same call the game's SetupSelectableCards makes: exclude the source that's already distributing
+        // (its click is Inspect now; picking another source ends its distribution natively).
+        var sources = _damageEval.GetCardsWithDistributableDamage(CurrentDamageSourceId()).Distinct().ToList();
         // During the tutorial only the spotlighted source may distribute — offer just it, so you can't pick
         // a Pokémon the tutorial forbids and land on a dead end. (Answers the "select a different Pokémon"
         // question: the tutorial does NOT allow another source.)
@@ -1452,6 +1542,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
         if (forced != null && forced != eid && _damageEval != null
             && _damageEval.GetCardsWithDistributableDamage(null).Contains(forced))
             eid = forced;
+        _damageRetry = null;   // a drop held for an old target must not survive a source change
         _damageSource = eid;
         // Distribution is triggered LAZILY on the first drop (EnsureDamageSourceDistributing), not here —
         // the tutorial's pick-up coach subscribes ~90 ms after the menu opens, and this can run at menu-open
@@ -1474,7 +1565,6 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private static MethodInfo? _damageSrcEventMethod;
     private bool EnsureDamageSourceDistributing()
     {
-        _damageDropWait = 0;   // the counter-drop wait starts fresh once the source begins distributing
         if (_damageSource == null || _mgr == null || _damageMenu == null) return false;
         var src = _mgr.GetCard(_damageSource);
         if (src == null) return false;
@@ -1485,20 +1575,19 @@ internal sealed class BattlePromptScreen : IScreenHandler
             // that overlay and strands the player behind it instead of distributing. Bail cleanly, never click.
             if (src.Interactions?.OverrideClickListener is not DistributeDamageFromCardOnClick)
             { Log.Warn($"BattlePrompt: {_damageSource} click is inspect (already distributed), not distributing — would open the card viewer"); return false; }
-            NativeClick(src);   // DistributeDamageFromCardOnClick → StartDistributionFromOwner (spawns counters + fires event)
-            try { _mgr.TargetingHandler.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: damage distribute refresh threw: {ex.Message}"); }
-            // StartDistributionFromOwner sets the endpoint synchronously, so a real distribute shows up now.
-            // If it didn't (no override / blocked), report failure so the caller stays recoverable — never
-            // proceed as if the tray were coming (that would strand us waiting on counters that never spawn).
+            // DistributeDamageFromCardOnClick → StartDistributionFromOwner: ends any other source's
+            // distribution, spawns the tray SYNCHRONOUSLY, fires the coach's event, and refreshes the
+            // placement context itself — nothing to wait for afterwards.
+            NativeClick(src);
             if (CurrentDamageSourceId() != _damageSource) { Log.Warn($"BattlePrompt: couldn't start damage distribution from {_damageSource}"); return false; }
             _damageSourceStarted = true;
             Log.Info($"BattlePrompt damage: distributed source {_damageSource}, tray counters now {TrayCounters().Count}");
             return true;
         }
         // Already distributing (a lone source auto-starts at menu-open) → its event fired before the coach
-        // subscribed; re-fire it. Only inside a real tutorial battle (else a harmless no-op / no listener).
+        // subscribed; re-fire it. Only inside a match the FTUE actually governs (else a harmless no-op).
         _damageSourceStarted = true;
-        if (FTUEHook.FtueIsRunning && FTUEMatchManager.Instance != null)
+        if (FTUEHook.FtueGovernsMatch(_mgr) && FTUEMatchManager.Instance != null)
         {
             try
             {
@@ -1514,8 +1603,11 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     private void BackToDamageSources()
     {
-        // Return the lifted counters to the source (the game's own end-distribution) before re-choosing.
-        try { _damageMenu?.GetDamageController()?.EndDistribution(putHeldCardsInLimbo: false); } catch { }
+        // List the OTHER eligible sources; the current one keeps distributing. Choosing another source
+        // clicks it, and the game's own SendCardToDistributorOnClick ends this distribution and starts
+        // there — the same atomic switch a sighted player's click performs. (Never call EndDistribution
+        // ourselves; no real click path does.)
+        _damageRetry = null;   // a drop held for an old target must not survive the switch flow
         _damageSource = null;
         RebuildDamageOptions();
         _idx = 0; _line = -1; _lines = null;
@@ -1536,86 +1628,85 @@ internal sealed class BattlePromptScreen : IScreenHandler
             var e = eid;
             _options.Add(new Option { Name = (move ? "Move damage to " : "Put damage on ") + ResolveName(e), Eid = e, Choose = () => PlaceDamage(e) });
         }
-        if (move) _options.Add(new Option { Name = "Back", Choose = BackToDamageSources });
+        // Back = switch source. Only offered while another source is actually eligible — the game
+        // excludes the current distributor, so with one source there is nothing to go back to.
+        if (move && _damageEval.GetCardsWithDistributableDamage(CurrentDamageSourceId()).Any())
+            _options.Add(new Option { Name = "Back", Choose = BackToDamageSources });
         if (_damageEval.AreMinimumConstraintsSatisfied())
             _options.Add(new Option { Name = "Done", IsDone = true, Choose = SubmitDamage });
     }
 
     // Drop ONE damage counter on the target — the game's own drag. Pick the tray counter the tutorial
     // spotlights (else the first available), hold it with the placement initiator aimed at the target, and
-    // commit over the next ticks (same hold-and-drop as a hand play). The drop applies the damage and clears
-    // the counter's FTUE focus, advancing the drag coach. Press again to move another counter.
+    // arm the commit — all on this one keypress. The game answers through its own events: success is
+    // ReactToSuccessfulPlacement (announce + rebuild there), a refusal is the placement loop ending without
+    // it (OnDamagePlacementEnded speaks up), and a not-ready tutorial counter completes via the coach-focus
+    // / unblock hooks. No frame counting anywhere.
     private void PlaceDamage(string targetEid)
     {
         if (_damageMenu == null || _mgr == null) return;
+        if (_damageDropInFlight) return;   // the previous drop's placement loop hasn't reported back — a double-press, ignore
+        if (DamageWaitingForServer()) { _router.Speech.Say("Waiting for the game", interrupt: true); return; }
         // MOVE: on the very first drop, lift the source's counters into the tray (and fire the pick-up
-        // coach). Then retry the drop next frame — the counters take a beat to spawn. PUT already has them.
+        // coach). StartDistributionFromOwner spawns the tray synchronously, so keep going right here.
         if (IsDamageMove && _damageSource != null && !_damageSourceStarted)
         {
             if (!EnsureDamageSourceDistributing()) { _router.Speech.Say("Couldn't lift damage from that Pokémon", interrupt: true); return; }
-            ArmPendingChoose(() => PlaceDamage(targetEid));
-            return;
         }
         var target = _mgr.GetCard(targetEid);
         if (target is not ICardPlacementReceiver recv) { _router.Speech.Say("Can't put damage there", interrupt: true); return; }
-        bool coachGuiding = FTUEHook.FtueIsRunning && FTUEMatchManager.Instance != null && FTUEMatchManager.Instance.focusedCard != null;
+        // While the tutorial owns the cards, a not-ready counter is a COACH-TIMING state, not a
+        // refusal, so hold the drop and let the game's own events complete it. The signal is the
+        // FTUE's OWN restriction flag, blockInputs (set by BlockAll for every coached step), plus a
+        // tracked drag coach — NOT "a tutorial battle exists": FTUEMatchManager.Instance is present
+        // in NORMAL matches too (CardInteractions dereferences Instance.blockInputs on every click),
+        // so gating on the instance alone would swallow real refusals in ranked (Codex review
+        // finding 2). The hold covers the observed live gap where Enter lands after the pick-up
+        // coach exits and before FTUEDragDamage arms (21.8s vs 22.8s in the log) — completed by
+        // DragDamageBlockCards_Postfix / FocusBlockDrag_Postfix / OnTargetabilityEvaluated.
+        // Backspace abandons a held drop.
+        bool ftueOwnsCards = FTUEHook.DragDamageCoachActive
+            || (FTUEHook.FtueGovernsMatch(_mgr)
+                && FTUEMatchManager.Instance != null && FTUEMatchManager.Instance.blockInputs);
         var counter = NextDamageCounter();
         if (counter == null)
         {
-            // No counter to drop yet: the tray is still spawning, or (tutorial) the drag coach hasn't focused
-            // its counter yet. Keep waiting (bounded). We must NOT drop a DIFFERENT counter while a coach is
-            // guiding — it waits for its exact focused instance — so on timeout we bail rather than fall back
-            // to another counter; without a coach, any tray counter is fine.
-            if (++_damageDropWait < 300) { ArmPendingChoose(() => PlaceDamage(targetEid)); return; }
-            _damageDropWait = 0;
-            if (coachGuiding) { Log.Info($"BattlePrompt damage: waited out, coach focus never became a tray counter (focused={FtueForcedCardEid() ?? "null"})"); _router.Speech.Say("Can't move that counter now", interrupt: true); return; }
-            counter = FirstTrayCounter();
-            if (counter == null) { _router.Speech.Say("No damage counter to move", interrupt: true); return; }
+            if (ftueOwnsCards) { _damageRetry = () => PlaceDamage(targetEid); return; }
+            _router.Speech.Say("No damage counter to move", interrupt: true); return;
         }
         var th = _mgr.TargetingHandler;
-        try { th.RefreshPlacementContext(); } catch (Exception ex) { Log.Error($"BattlePrompt: damage RefreshPlacementContext threw: {ex.Message}"); }
-        // The counter isn't grabbable the instant the coach focuses it — its FocusCard coroutine un-blocks it
-        // (clears blockDrag, which the FTUE targetability rule reads) a beat later. So RETRY the pick-up
-        // rather than giving up (the old bug: it bailed here and the tutorial "did nothing").
-        // Drive the drop exactly like the energy move / no-target play (BattleScreen.BeginNoTargetPlay): SET
-        // THE RECEIVER FIRST, then pick the counter up, then arm — all on this one keypress. TryTargetCard runs
-        // the placement loop's first pass synchronously (CoroutineScope → StartCoroutine, up to the first
-        // yield), and that pass records the receiver from KbPlacementInitiator.Chosen. Choosing BEFORE the
-        // pickup means the loop records the real target on that first pass, so ArmPlacement commits immediately.
-        // No tick counter — the player's Enter is the trigger. (The old order set Chosen AFTER the pickup, so
-        // the first pass recorded null and needed 2 ticks to recover; that 2-tick was the workaround we removed.)
-        _damageInit.Reset();
-        _damageInit.SetChosen(recv);
-        bool targetable = th.IsCardTargetable(counter);
-        bool acted = targetable && th.TryTargetCard(counter, _damageInit);
-        // TEMP one-shot diagnostic (to be removed): the opponent's HP just before this counter lands. Across
-        // both moves this shows whether the full damage is accumulating on the opponent, or a move's worth is
-        // being lost — the "~10 left vs ~40 left" question that decides the fix.
-        string tgtHp = "?";
-        try { var ti = (target as Card3D)?.cardInfo; if (ti != null) tgtHp = $"{ti.totalHP - ti.damageCounters * 10}/{ti.totalHP}"; } catch { }
-        Log.Info($"BattlePrompt damage pickup: counter={counter.entityID} target={targetEid} targetHP={tgtHp} targetable={targetable} acted={acted}");
-        if (!acted)
+        if (!th.IsCardTargetable(counter))
         {
-            if (++_damageDropWait < 300) { ArmPendingChoose(() => PlaceDamage(targetEid)); return; }
-            _damageDropWait = 0;
+            if (ftueOwnsCards) { _damageRetry = () => PlaceDamage(targetEid); return; }
             _router.Speech.Say("Can't move that counter now", interrupt: true); return;
         }
-        _damageDropWait = 0;
+        // Same receiver-first order as the energy move / no-target play (BattleScreen.BeginNoTargetPlay):
+        // TryTargetCard runs the placement loop's first pass synchronously, and that pass records the
+        // receiver from KbPlacementInitiator.Chosen — so choose BEFORE the pickup, then arm.
+        _damageInit.Reset();
+        _damageInit.SetChosen(recv);
+        bool acted = false;
+        try { acted = th.TryTargetCard(counter, _damageInit); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: damage TryTargetCard threw: {ex.Message}"); }
+        Log.Info($"BattlePrompt damage pickup: counter={counter.entityID} target={targetEid} acted={acted}");
+        if (!acted) { _damageInit.Reset(); _router.Speech.Say("Can't move that counter now", interrupt: true); return; }
         _damageTargetEid = targetEid;
-        _damageInit.ArmPlacement();   // commit on the loop's next exit check — the player's Enter is the trigger
-        // No rebuild here: the counter is applied next frame in the game's ReactToSuccessfulPlacement, whose
-        // postfix sets _damageDropApplied so the next Tick runs FinishDamageDrop off the committed state.
+        _damageDropLanded = false;
+        _damageDropInFlight = true;
+        _damageInit.ArmPlacement();   // the player's Enter is the trigger; the game reports the outcome
     }
 
-    // The tray counter to drop. In a tutorial battle the drag coach (FTUEDragDamage) focuses the EXACT
-    // counter it wants dropped (GetDamageCards()[counterPos]) and waits for THAT instance to clear — dropping
-    // any other leaves it focused and hangs the coach — so drop only the focused counter, and return null
-    // (wait) until it's focused. Outside a tutorial battle, drop any counter in the tray.
+    // The tray counter to drop. While an FTUEDragDamage coach is active it focuses the EXACT counter it
+    // wants dropped (GetDamageCards()[counterPos]) and waits for THAT instance to clear — dropping any
+    // other leaves it focused and hangs the coach — so then drop only the focused counter, and return
+    // null (hold the drop) until it's focused. A tutorial step WITHOUT that coach, and every normal
+    // match, drops any tray counter. Gating on the tracked coach state (not just "a tutorial battle")
+    // is what keeps un-coached reparent steps from deadlocking on a focus that never comes.
     private Card3D? NextDamageCounter()
     {
         var cards = TrayCounters();
         if (cards.Count == 0) return null;
-        if (FTUEHook.FtueIsRunning && FTUEMatchManager.Instance != null)
+        if (FTUEHook.DragDamageCoachActive && FTUEMatchManager.Instance != null)
         {
             var focused = FTUEMatchManager.Instance.focusedCard;
             if (focused == null) return null;
@@ -1624,9 +1715,6 @@ internal sealed class BattlePromptScreen : IScreenHandler
         }
         return cards[0];
     }
-
-    // Any tray counter — the bounded fallback when we've waited too long for a focused one.
-    private Card3D? FirstTrayCounter() { var c = TrayCounters(); return c.Count > 0 ? c[0] : null; }
 
     private List<Card3D> TrayCounters()
     {
@@ -1643,24 +1731,111 @@ internal sealed class BattlePromptScreen : IScreenHandler
         catch { return null; }
     }
 
-    // The drop is armed; the menu applies the damage next frame and may auto-submit at the max. Re-read what's
-    // left and re-offer targets — if it auto-submitted and closed, the next Tick's IsPromptOpen pops us. (This
-    // was the tail of TickDamageCommit; it now runs straight from PlaceDamage since the commit is immediate.)
-    private void FinishDamageDrop()
+    // A drop just landed (called from the ReactToSuccessfulPlacement postfix, the same moment the game
+    // refreshes its own click overrides). Announce the VERIFIED result — read back from
+    // finalDamageSelections, the very payload SelectInput will send — and re-offer targets.
+    // Do NOT reset _damageSource: a single-source MOVE keeps its one source for the whole prompt (the
+    // just-used source's click is INSPECT now; collapsing back to it would pop the card viewer).
+    private void AfterDamageDropApplied(ICardPlacementReceiver receiver)
     {
-        string placed = _damageTargetEid;
-        if (!IsPromptOpen()) return;
-        if (_damageSel != null) _damageEval = new ReparentDamageConstraintEvaluator(_damageSel);   // re-read live state
-        // Do NOT reset _damageSource here. A single-source MOVE keeps its one source for the whole prompt — you
-        // move up to N counters from it, then the game auto-submits when its movable damage is spent. This
-        // refresh runs AFTER the drop applies, and `CurrentDamageSourceId()` reads null in that window (between
-        // the send completing and the tray re-lifting), so resetting kicked us back to source-pick; the
-        // source-collapse then re-clicked the just-used source, whose click is now INSPECT, popping the big card
-        // viewer and stranding the player (observed 2026-07-12). Stay on the source and keep dropping.
+        _damageRetry = null;
+        string eid = _damageTargetEid;
+        try { if (receiver is Card3D rc && !string.IsNullOrEmpty(rc.entityID)) eid = rc.entityID; } catch { }
+        if (_damageMenu == null || !IsPromptOpen()) return;   // auto-submitted at the limit → the close path pops us
         RebuildDamageOptions();
         _idx = 0; _line = -1; _lines = null;
-        _router.Speech.Say($"Moved a damage counter to {ResolveName(placed)}", interrupt: true);
+        _router.Speech.Say(DamageDropSummary(eid), interrupt: true);
         if (_options.Count > 0) SpeakOption(_idx, interrupt: false);
+    }
+
+    // "Dunsparce has 60 damage." — read from the selection state the server will receive, so what the
+    // player hears is what actually got recorded, never an assumption. Just the target's total: the
+    // "N counters left to place" tally that followed it was cut on Amethyst's feedback (2026-07-23) —
+    // the focused option that queues right after carries the flow.
+    private string DamageDropSummary(string eid)
+    {
+        var name = ResolveName(eid);
+        try
+        {
+            var fin = _damageSel?.finalDamageSelections.FirstOrDefault(f => f.entityID == eid);
+            return fin != null ? $"{name} has {fin.newDamageCounters * 10} damage." : $"Moved damage to {name}.";
+        }
+        catch { return $"Moved damage to {name}"; }
+    }
+
+    // The placement loop ended. Success already went through the ReactToSuccessfulPlacement postfix; if our
+    // armed drop ends WITHOUT it, the receiver was refused (FTUE gate, staleness) and the counter snapped
+    // back to the tray — say so instead of silently doing nothing. (CardTargetingHandler fires this event
+    // strictly AFTER the success callbacks, so the discrimination can't race.)
+    private void OnDamagePlacementEnded()
+    {
+        if (!_damageDropInFlight) return;
+        _damageDropInFlight = false;
+        if (_damageDropLanded) return;
+        try
+        {
+            _damageInit.Reset();
+            if (!IsPromptOpen()) return;
+            RebuildDamageOptions();
+            _idx = 0; _line = -1; _lines = null;
+            _router.Speech.Say("Couldn't place the counter there", interrupt: true);
+            if (_options.Count > 0) SpeakOption(_idx, interrupt: false);
+        }
+        catch (Exception ex) { Log.Error($"BattlePrompt: damage cancel follow-up threw: {ex.Message}"); }
+    }
+
+    // A drop the player asked for was held for the game (coach focus / unblock / server echo); run it now.
+    private void CompleteDamageRetry()
+    {
+        var r = _damageRetry;
+        if (r == null) return;
+        _damageRetry = null;
+        try { if (IsPromptOpen()) r(); }
+        catch (Exception ex) { Log.Error($"BattlePrompt: damage retry threw: {ex.Message}"); }
+    }
+
+    private bool DamageWaitingForServer()
+    {
+        try { return _damageMenu != null && DamageWaitingField?.GetValue(_damageMenu) is true; }
+        catch { return false; }
+    }
+
+    private void HookDamagePlacementEnded()
+    {
+        if (_damagePlacementEndedHooked || _mgr == null) return;
+        try
+        {
+            _mgr.TargetingHandler.OnPlacementEvaluationEnded += OnDamagePlacementEnded;
+            // A held drop can also become possible through a plain targetability rebuild — e.g.
+            // FTUEMatchManager.UnblockAllCards ends in RefreshPlacementContext with no coach call —
+            // so listen to the game's own "targetability re-evaluated" broadcast too (filtered to
+            // our menu's context). The retry re-validates and re-arms itself if still blocked.
+            _mgr.TargetingHandler.OnTargetabilityEvaluated += OnDamageTargetabilityEvaluated;
+            _damagePlacementEndedHooked = true;
+        }
+        catch (Exception ex) { Log.Error($"BattlePrompt: placement-ended subscribe threw: {ex.Message}"); }
+    }
+
+    private void UnhookDamagePlacementEnded()
+    {
+        if (!_damagePlacementEndedHooked) return;
+        try
+        {
+            if (_mgr != null)
+            {
+                _mgr.TargetingHandler.OnPlacementEvaluationEnded -= OnDamagePlacementEnded;
+                _mgr.TargetingHandler.OnTargetabilityEvaluated -= OnDamageTargetabilityEvaluated;
+            }
+        }
+        catch { }
+        _damagePlacementEndedHooked = false;
+    }
+
+    private void OnDamageTargetabilityEvaluated(TPCI.Rainier.Match.Targeting.ITargetCardPlacementContext context)
+    {
+        if (_damageRetry == null || _damageMenu == null) return;
+        if (!ReferenceEquals(context, _damageMenu)) return;   // another menu's evaluation — not ours
+        CompleteDamageRetry();
     }
 
     // Abandon a counter the player Backspaced out of while it was still surfacing (a bounded pickup retry) —
@@ -1668,6 +1843,8 @@ internal sealed class BattlePromptScreen : IScreenHandler
     // returns to the tray; the menu returns any un-dropped counters to the source at submit anyway.
     private void CancelDamageHold()
     {
+        _damageRetry = null;
+        _damageDropInFlight = false;
         try { _mgr?.TargetingHandler.ClearTarget(); } catch (Exception ex) { Log.Error($"BattlePrompt: damage cancel threw: {ex.Message}"); }
         _damageInit.Reset();
         if (IsPromptOpen()) RebuildDamageOptions();
@@ -1675,9 +1852,9 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     // The FTUE-forced card id (the game's spotlighted card) while a tutorial battle is guiding this
     // selection, else null. Used to restrict the source list to the one the tutorial permits.
-    private static string? FtueForcedCardEid()
+    private string? FtueForcedCardEid()
     {
-        if (!FTUEHook.FtueIsRunning) return null;
+        if (!FTUEHook.FtueGovernsMatch(_mgr)) return null;
         var m = FTUEMatchManager.Instance;
         var c = m != null ? m.focusedCard : null;
         return c != null ? c.entityID : null;
@@ -1689,7 +1866,12 @@ internal sealed class BattlePromptScreen : IScreenHandler
     private void SubmitDamage()
     {
         if (_damageMenu == null) return;
-        if (_damageSel != null) _damageEval = new ReparentDamageConstraintEvaluator(_damageSel);
+        // A drop is still inside the placement coroutine (the release is observed after a yield) —
+        // submitting now would tear the tray down under it and lose that counter. One beat later the
+        // drop lands and its own follow-up re-offers Done.
+        if (_damageDropInFlight) { _router.Speech.Say("Still placing the counter", interrupt: true); return; }
+        if (DamageWaitingForServer()) { _router.Speech.Say("Waiting for the game", interrupt: true); return; }
+        // The MENU's own evaluator (never a fresh copy — constructing one wipes the recorded drops).
         if (_damageEval != null && !_damageEval.AreMinimumConstraintsSatisfied())
         { _router.Speech.Say("You haven't moved enough damage yet", interrupt: true); return; }
         _submitted = true;
@@ -1804,16 +1986,12 @@ internal sealed class BattlePromptScreen : IScreenHandler
     {
         if (!IsPromptOpen()) { Close(); return; }          // submitted/dismissed → pop
         if (!Application.isFocused || _submitted) return;  // wait silently for the close after submit
-        // The game just applied a moved/placed counter (its ReactToSuccessfulPlacement fired) — rebuild options
-        // and announce off that committed state, the native completion trigger (not a same-frame optimistic read).
-        if (_damageDropApplied) { _damageDropApplied = false; FinishDamageDrop(); }
         if (_attachHolding) { TickAttachCommit(); return; }   // committing an attach onto the chosen Pokémon
         if (!string.IsNullOrEmpty(_pendingSelectEid)) { TickPendingEnergySelect(); return; }   // distributing then selecting an energy
-        // A damage drop is now atomic (pick up + arm on the one keypress), but the pickup can be mid surface-retry
-        // (_pendingChoose re-arms PlaceDamage while the coach's counter or the tray spawns). Let Backspace/Escape
-        // abandon that wait rather than retrying forever — clears any half-grab back to the tray.
-        if (_damageMenu != null && _pendingChoose != null && (Input.GetKeyDown(KeyCode.Backspace) || Input.GetKeyDown(KeyCode.Escape)))
-        { _pendingChoose = null; CancelDamageHold(); return; }
+        // A damage drop can be held for the game (the coach hasn't focused / freed its counter yet — the
+        // event hooks complete it). Let Backspace/Escape abandon that hold rather than leaving it armed.
+        if (_damageMenu != null && _damageRetry != null && (Input.GetKeyDown(KeyCode.Backspace) || Input.GetKeyDown(KeyCode.Escape)))
+        { CancelDamageHold(); return; }
         // A press is waiting on a card that was still moving. Retry it; it re-arms itself if still unsettled.
         if (_pendingChoose != null) { var retry = _pendingChoose; _pendingChoose = null; retry(); return; }
 
@@ -1968,7 +2146,10 @@ internal sealed class BattlePromptScreen : IScreenHandler
         // in flight, and ClearTarget/Reset are harmless no-ops when nothing is held.
         try { _mgr?.TargetingHandler.ClearTarget(); } catch (Exception ex) { Log.Error($"BattlePrompt: close ClearTarget threw: {ex.Message}"); }
         _damageInit.Reset(); _attachInit.Reset();
-        _damageDropApplied = false;
+        UnhookDamagePlacementEnded();
+        _damageRetry = null;
+        _damageDropLanded = false;
+        _damageDropInFlight = false;
         if (_attachHolding) { _attachHolding = false; _attachReceiver = null; _attachEnergy = null; }
         _options.Clear();
         _router.Deactivate(this);

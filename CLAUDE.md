@@ -19,12 +19,12 @@ See `../research/QUESTIONS-001-initial-setup.md` for the locked-in design decisi
 ## Repos & Paths
 
 ### This Repo (mod source)
-- **Local:** `C:\Users\Amethyst\projects\Pokemon TCG live\mod`
+- **Local:** `H:\projects\Pokemon TCG live\mod`
 - **GitHub:** https://github.com/RealAmethyst/pokemon-tcg-access (private)
 - Single C# project: `PokemonTCGLiveAccessibility.csproj` (net472, SDK-style)
 
 ### Research & Data (NOT in git, local only)
-- **Local:** `C:\Users\Amethyst\projects\Pokemon TCG live\research`
+- **Local:** `H:\projects\Pokemon TCG live\research`
 - `research/decompiled/` — 60 game-specific DLLs decompiled with `ilspycmd` (~26 MB, 5,534 .cs files)
 - `research/architecture-notes.md` — first-pass architecture survey
 - `research/launching-the-game.md` — launch flags, window-focus workarounds, troubleshooting
@@ -262,7 +262,12 @@ The outer Profile screen and every inner avatar customization category panel are
    per [[feedback-arrows-over-tab]]. Enter routes through each button's onClick
    (PlayBattle / SkipThisBattle / SkipAllBattles).
 
-7. **Battle — major focus for next session.** Phase 3 begins. The actual in-battle UI is
+7. **Battle — built across June–July sessions** (board nav, prompts, FTUE gating — see the memory
+   index for the full map). **2026-07-23: the damage-counter system (`ReparentDamageMenu` — Phantom
+   Dive puts, Adrena-Brain moves) was fully rewritten event-driven** after finding that constructing
+   a `ReparentDamageConstraintEvaluator` mid-prompt wipes the shared `finalDamageSelections` payload
+   (the counter-loss bug). See memory `project_damage_counter_rewrite`. Pending in-game verification.
+   Original phase-3 kickoff notes (kept for context): Phase 3 begins. The actual in-battle UI is
    the largest unhandled surface in the game: board zones (active, bench, prizes, hand,
    deck, discard), card detail / inspection, action selection (attack, retreat, play
    item, evolve), turn flow, opponent status. Battle is mouse-primary; board cards and
@@ -305,6 +310,6 @@ Refer to `../research/architecture-notes.md` for hook target line numbers and ra
 ## Memory & persistent notes
 
 Long-term durable knowledge for future Claude sessions lives at:
-`C:\Users\Amethyst\.claude\projects\C--Users-Amethyst-projects-Pokemon-TCG-live-mod\memory\MEMORY.md`
+`H:\.claude\projects\H--projects-Pokemon-TCG-live-mod\memory\MEMORY.md`
 
 That index points to per-topic memory files covering user preferences, project identity, design decisions, and gotchas. Keep it updated when something non-obvious happens.

@@ -199,7 +199,14 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         }
 
         var rewards = RewardsSummary();
-        if (!string.IsNullOrWhiteSpace(rewards)) parts.Add(rewards!);
+        if (!string.IsNullOrWhiteSpace(rewards))
+        {
+            // Frame a bare item list. These tiles ARE visible to a sighted player before collecting,
+            // but without a leading word the list read as if the mod were leaking the pack's hidden
+            // contents (reported 2026-07-23 — the loose reward cards were mistaken for pack cards).
+            if (parts.Count == 0) parts.Add("Rewards");
+            parts.Add(rewards!);
+        }
 
         if (tier != null)
         {
@@ -286,6 +293,16 @@ internal sealed class RewardOverlayScreen : IScreenHandler
         }
         var loc = Loc(item.contentLocId);
         if (loc != null) return loc;
+        // A booster's display name: the game titles it by using its clientId AS the loc key
+        // (ContentItemRewardUI.SetTitle default case → SetTextByID(clientId)) — resolve the same key
+        // and speak it VERBATIM: the loc string is the full display name and already ends in
+        // "Booster Pack" ("Mega Evolution—Pitch Black Booster Pack", screenshot-verified 2026-07-23),
+        // so appending anything would double it.
+        if (item.itemType == ItemData.ItemType.Booster)
+        {
+            var packName = Loc(item.clientId);
+            if (packName != null) return packName;
+        }
         return item.itemType switch
         {
             ItemData.ItemType.Booster => "booster pack",

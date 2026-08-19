@@ -183,6 +183,11 @@ internal sealed class BattleScreen : IScreenHandler
         if (_instance == null) return;
         _instance._manager = __instance;
         _instance._phase = __instance.currentState;
+        // Permanent one-line telemetry: the global lesson flag vs the game's per-match FTUE switch.
+        // The old ranked "tutorial isn't ready" lockout's exact mechanism is UNPROVEN (a Codex verify
+        // showed the global-true-at-start story implies the delegates were installed too) — if it
+        // ever recurs, this line answers which state the match actually opened in.
+        Log.Info($"Battle start: ftueRunning={FTUEHook.FtueIsRunning} ftueGoverns={FTUEHook.FtueGovernsMatch(__instance)}");
         _instance.HookSelectionState(__instance);
         _instance.HookHandChanges(__instance);
         if (!_instance._active)
@@ -1524,10 +1529,12 @@ internal sealed class BattleScreen : IScreenHandler
     // ---- Tutorial (FTUE) guidance: keep the player on the spotlighted card ----
 
     // The FTUE's spotlighted card exactly as the game reports it. Non-null does NOT mean the player
-    // still has to go and act on it — use FtueFocusedCard for that.
+    // still has to go and act on it — use FtueFocusedCard for that. Gated on the game's per-match
+    // FTUE switch (the installed permit delegate), NOT the global lesson flag — that flag stays true
+    // for parked / always-running lessons right through ranked matches (see FTUEHook.MatchFtuePermit).
     private Card3D? RawFtueFocusedCard()
     {
-        if (!FTUEHook.FtueIsRunning) return null;
+        if (!FTUEHook.FtueGovernsMatch(_manager)) return null;
         var m = FTUEMatchManager.Instance;
         return m == null ? null : m.focusedCard;
     }
@@ -1553,27 +1560,21 @@ internal sealed class BattleScreen : IScreenHandler
         return IsSettledInOwner(card) ? card : null;
     }
 
-    // Does the FTUE permit acting on this card right now? Uses the game's OWN rule
-    // (DoesFTUEPermitCardTargetability): true outside the FTUE, true in free play, true for the
-    // spotlighted card during a forced step; false for a non-spotlighted card or a not-yet-armed step.
-    // Replaces the old blockInputs check, which wrongly blocked during free play (blockInputs lingers).
-    private static System.Reflection.MethodInfo? _ftuePermitMethod;
+    // Does the FTUE permit acting on this card right now? Calls the permit the game itself installed
+    // on THIS match's targeting handler (FTUEMatchManager.Start → SecondaryIsCardTargetable =
+    // DoesFTUEPermitCardTargetability): true in free play, true for the spotlighted card during a
+    // forced step; false for a non-spotlighted card or a not-yet-armed step. No delegate installed
+    // means the FTUE does not govern this match — never impose tutorial rules there. (The old gate
+    // read the GLOBAL lesson flag + the always-present FTUEMatchManager and reflected the private
+    // method, which locked a ranked player out of every action with "the tutorial isn't ready for
+    // that yet" when a parked/always-running lesson kept the flag true — field report, 2026-07-23.)
     private bool FtuePermitsCard(Card3D card)
     {
-        if (!FTUEHook.FtueIsRunning) return true;
-        var m = FTUEMatchManager.Instance;
-        if (m == null) return true;
-        try
-        {
-            // DoesFTUEPermitCardTargetability is private — reflect it (cached). It's the game's exact
-            // rule: free play → true; spotlighted card (not blockDrag) → true; else false.
-            if (_ftuePermitMethod == null)
-                _ftuePermitMethod = typeof(FTUEMatchManager).GetMethod("DoesFTUEPermitCardTargetability",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            if (_ftuePermitMethod == null) return true;
-            return (bool)_ftuePermitMethod.Invoke(m, new object[] { card });
-        }
-        catch { return true; }
+        if (card == null) return true;
+        var permit = FTUEHook.MatchFtuePermit(_manager);
+        if (permit == null) return true;
+        try { return permit(card); }
+        catch (Exception ex) { Log.Error($"BattleScreen: FTUE permit threw: {ex.Message}"); return true; }
     }
 
     // The targeting evaluator (PlacementPurposeEvaluator) decides "is this card placeable" with a
@@ -1623,7 +1624,7 @@ internal sealed class BattleScreen : IScreenHandler
             : "no cardInfo";
         bool sdkTurn = false;
         try { sdkTurn = NetworkMatchController.currentMatchInfo?.myPlayerInfo?.isMyTurn ?? false; } catch { }
-        return $"{counts} canPerform={_manager?.CanPerformNewActions} setup={_manager?.IsSetupPhase} mgrTurn={_manager?.IsMyTurn} sdkTurn={sdkTurn} ftueRun={FTUEHook.FtueIsRunning}";
+        return $"{counts} canPerform={_manager?.CanPerformNewActions} setup={_manager?.IsSetupPhase} mgrTurn={_manager?.IsMyTurn} sdkTurn={sdkTurn} ftueRun={FTUEHook.FtueIsRunning} ftueGoverns={FTUEHook.FtueGovernsMatch(_manager)}";
     }
 
     // On each new coaching step (the FTUE spotlights a different card), announce which card it wants

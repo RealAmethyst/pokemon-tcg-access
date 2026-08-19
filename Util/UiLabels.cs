@@ -90,6 +90,23 @@ internal static class UiLabels
         if (s.GetComponentInParent<ShopPageExpansionsScreen>() != null && !HasLetterTextChild(s))
             return "Choose expansion";
 
+        // Format toggle (ChangeGameModeButton — DECKS header, and inside the deck editor since the
+        // Milestone3 update): its only text child is the bare format name ("Standard"), which alone
+        // doesn't say what pressing it does. Say the action, then the game's own localized format.
+        if (s.GetComponentInParent<ChangeGameModeButton>() != null)
+        {
+            var current = FirstLetterText(s);
+            return string.IsNullOrEmpty(current) ? "Change format" : $"Change format, {current}";
+        }
+
+        return null;
+    }
+
+    // The first letter-bearing text under the control (skips icon glyphs / bare numbers).
+    private static string? FirstLetterText(Selectable s)
+    {
+        foreach (var t in s.GetComponentsInChildren<TMPro.TMP_Text>(includeInactive: false))
+            if (HasLetter(t.text)) return t.text.Trim();
         return null;
     }
 
