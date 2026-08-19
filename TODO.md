@@ -1,24 +1,55 @@
-# Today's work — please test (2026-07-13)
+# Accessibility settings can be changed now, and values read first (2026-08-20)
 
-Fixed and deployed. The DLL is already copied into the game, so just launch and test.
+Both in and deployed.
 
-## Stadium ability wouldn't activate — Surfing Beach — fixed, please test
+## Why you couldn't change them
 
-**What you reported.** In the tutorial, the Surfing Beach stadium wouldn't let you use its ability. The action menu opened and listed the ability, but it read as "unavailable" — wrong, because the tutorial was pointing right at it and wanting you to use it. You noted some other stadium abilities work, but this one never did.
+Not a game problem — the mod's own rule. Its navigation code deliberately treats a checkbox the way
+a web form does: **Space** ticks it and **Enter** does nothing. That's a reasonable convention for a
+form, and it's wrong for a settings row, where Enter is what you'd reach for. There was also no way
+for you to discover the difference, since the mod doesn't speak control instructions.
 
-**What was going on (found in the game's own code, not guessing).** Two different tutorial "spotlight" mechanisms exist. Most attack/ability steps arm one specific action a moment after you open the menu — and to stop you firing an attack in the split second before that arming finishes (which freezes the match), the mod holds the action until it's armed. That guard was written to assume every spotlight arms an action.
+So on this screen the settings toggles now take:
 
-But the kind of spotlight used for Surfing Beach — the one for an ability that then opens a follow-up choice — never arms a specific action at all. It just points at the card and waits for you to use it. So the mod's guard sat there forever thinking "not armed yet" and greyed the ability out permanently. That's why this stadium never worked while simpler ones did: the simpler ones use the arming kind of spotlight.
+- **Enter** — flips the setting.
+- **Right** — turns it on. **Left** — turns it off.
 
-**The fix.** The guard now only applies during the real "about to arm an attack/ability" window. For every other spotlight, the mod trusts the game's own on/off state for the button — the exact thing a sighted player's mouse obeys. So Surfing Beach's ability is usable the moment the game says it is. The attack-before-ready freeze protection is unchanged.
+Left and Right are deliberately fixed rather than flipping, so the same key always gives the same
+result, exactly like the sliders. Space still works as it always did.
 
-Checked by the independent reviewer — no issues found, and it confirmed the freeze protection is still intact.
+The tabs are untouched by this: they're toggles too, but they keep their tab behaviour, so nothing
+there changes.
 
-**Please test:**
-1. Get to the Surfing Beach stadium step in the tutorial (or any match where you've played a stadium with an activatable ability). Arrow to the stadium with S, press Enter to open its menu, and the ability should now read as usable — Enter on it activates it.
-2. If the ability opens a follow-up choice (pick a card, move something), see whether that choice then reads and works. If it gets stuck at that second step, that's a separate thing to chase — send me `C:\PokemonTCGLive\Mods\PokemonTCGLiveAccessibility.log` and I'll pick it up from there.
-3. A quick sanity check that nothing regressed: a normal tutorial attack step should still work (you can't fire the attack until the tutorial has asked for it), and a plain non-tutorial stadium ability should activate normally.
+Turning a setting on or off goes through the game's own change event, which is what applies and
+saves it — so it sticks, and it's the same path a mouse click takes.
 
-## One open question for you
+## Value first, and re-spoken on change
 
-You mentioned you think this also happens in normal (non-tutorial) play. From the code, the tutorial-only guard can't be the cause outside the tutorial — so if a stadium ability still won't activate in a normal match, it's something else (for instance the ability genuinely isn't usable at that moment, or its follow-up choice needs handling). If you hit it in a real match, grab the log at the moment you try and I'll dig in. No need to go looking for it specially.
+All four accessibility rows now read **name, value, then description**, and re-read themselves with
+the new value the moment you change one. That matches the sliders and the resolution dropdown, which
+you'd already found working.
+
+The General tab's rows were already name-then-value, so those were consistent to begin with.
+
+## One inconsistency I left alone
+
+The General tab says "checked" and "unchecked" for its switches, while the accessibility rows say
+"on" and "off" — because that's the game's own wording for those particular controls, and I'd rather
+use the game's words than the mod's where they exist.
+
+Having both in one screen is a bit uneven. I didn't change it because you asked about ordering rather
+than wording, and it affects rows you'd said were working. Say the word and I'll move the General
+switches onto the game's on/off wording too, so the whole screen matches.
+
+## Please test
+
+- On each of the four accessibility rows: press Enter, then Left, then Right. Each should change the
+  setting and immediately read back the new value.
+- Confirm the change sticks — leave settings, come back, and check it still reports what you set.
+- Confirm the card foil row still moves with Left and Right.
+- Confirm the tabs still behave as tabs and haven't started flipping.
+
+## Still open
+
+Whether to keep the mod repairing the card-foil arrows (broken in the game itself, for sighted
+players too) or just report that setting as unavailable.

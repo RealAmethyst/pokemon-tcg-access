@@ -106,17 +106,50 @@ internal sealed class KeyboardNavigator : INavSection
     // True when the current focus is in the visual top row of the group's grid. Used by
     // screen handlers to decide whether an Up arrow should escape to a section above this
     // one (rather than being a no-op when MoveBy(-Columns) hits the top).
-    public bool IsAtTopRow => _index >= 0 && _index < Columns;
-    // True when the current focus is in the visual bottom row. lastRowStart = (count-1)/cols
-    // rounded down to a row boundary; any index ≥ that lives in the partial last row.
+    // A group holding NO focus (nothing in it was focusable when we tried to enter) reports itself
+    // as being at BOTH edges, so an arrow leaves it instead of dead-ending. Returning false here is
+    // what made an unfocusable section a black hole: every section-stack screen gates its escape on
+    // `_activeGroup > 0 && nav.IsAtTopRow` / `< Count-1 && nav.IsAtBottomRow`, so with _index = -1
+    // BOTH directions were refused and the user was stranded with no focus and no way out (the HUB
+    // Settings back-arrow trap). Same semantics CardDexSections states explicitly for a section that
+    // cannot move internally: always escapable.
+    public bool IsAtTopRow
+    {
+        get
+        {
+            if (_index < 0 || _items.Count == 0) return true;   // no focus → never trap
+            return !HasNavigableInRowBeyond(-1);
+        }
+    }
+    // True when there is nowhere navigable left BELOW the focus in this group — i.e. Down should
+    // leave the section rather than move inside it.
     public bool IsAtBottomRow
     {
         get
         {
-            if (_items.Count == 0 || _index < 0) return false;
-            var lastRowStart = ((_items.Count - 1) / Columns) * Columns;
-            return _index >= lastRowStart;
+            if (_index < 0 || _items.Count == 0) return true;   // see IsAtTopRow — never trap
+            return !HasNavigableInRowBeyond(+1);
         }
+    }
+
+    // Is there any NAVIGABLE item in a row beyond the current one, in `direction`? This is the
+    // question a section escape actually needs answered: "can I still move inside this group?".
+    // Testing raw indices instead was a trap — a group whose trailing items are inactive (the game
+    // switches individual controls off) reported "not at the bottom row", so Down was refused as a
+    // section escape AND had nowhere navigable to move to, leaving the user stuck on the last live
+    // item with an arrow key that did nothing at all.
+    private bool HasNavigableInRowBeyond(int direction)
+    {
+        int cols = Columns;
+        if (cols <= 0) return false;
+        int currentRow = _index / cols;
+        for (int i = 0; i < _items.Count; i++)
+        {
+            int row = i / cols;
+            if (direction > 0 ? row > currentRow : row < currentRow)
+                if (IsNavigable(_items[i])) return true;
+        }
+        return false;
     }
 
     // Current column (0..Columns-1) of the focused item, or -1 if no focus. Lets the screen
@@ -332,6 +365,16 @@ internal sealed class KeyboardNavigator : INavSection
                 SetIndex(i, announce, interrupt: interruptPrior, announceGroup: true);
                 return;
             }
+        // Nothing in the target row is focusable right now (a row the game has momentarily switched
+        // off). Fall back to any focusable item ANYWHERE in the group rather than returning with no
+        // focus at all — a row-only scan is why a one-item section could end up unfocused, silent
+        // and inescapable.
+        for (int i = 0; i < _items.Count; i++)
+            if (IsActiveInHierarchy(_items[i]))
+            {
+                SetIndex(i, announce, interrupt: interruptPrior, announceGroup: true);
+                return;
+            }
     }
 
     // Restore the section's own remembered focus (set the last time the user was in it) if it's still
@@ -366,6 +409,16 @@ internal sealed class KeyboardNavigator : INavSection
             return;
         }
         for (int i = lastRowStart; i <= rowEnd; i++)
+            if (IsActiveInHierarchy(_items[i]))
+            {
+                SetIndex(i, announce, interrupt: interruptPrior, announceGroup: true);
+                return;
+            }
+        // Nothing in the target row is focusable right now (a row the game has momentarily switched
+        // off). Fall back to any focusable item ANYWHERE in the group rather than returning with no
+        // focus at all — a row-only scan is why a one-item section could end up unfocused, silent
+        // and inescapable.
+        for (int i = 0; i < _items.Count; i++)
             if (IsActiveInHierarchy(_items[i]))
             {
                 SetIndex(i, announce, interrupt: interruptPrior, announceGroup: true);
@@ -514,24 +567,25 @@ internal sealed class KeyboardNavigator : INavSection
         int currentCol = _index % Columns;
         int targetRow = currentRow + direction;
         if (targetRow < 0) return;
-        int rowStart = targetRow * Columns;
-        if (rowStart >= _items.Count) return;
-        int rowLastIndex = Mathf.Min(rowStart + Columns - 1, _items.Count - 1);
-        int targetIndex = Mathf.Min(rowStart + currentCol, rowLastIndex);
-        if (targetIndex == _index) return;
-        // Honour the same overlay-blocking filter as linear MoveBy — fall back to walking
-        // toward the target if the precise cell is blocked.
-        int probe = targetIndex;
-        while (probe >= rowStart && probe <= rowLastIndex)
+        // Walk row by row in the direction of travel. Stopping at the first row that has nothing
+        // navigable in it was wrong: the game switches individual controls off, and one dead row
+        // then swallowed the arrow entirely — no move, no speech, and (because the group still
+        // reported itself mid-list) no section escape either.
+        for (; targetRow >= 0; targetRow += direction)
         {
-            if (IsNavigable(_items[probe]))
-            {
-                SetIndex(probe, announce: true, interrupt: true, announceGroup: false);
-                return;
-            }
-            // Try the next column in the row (toward the start) so we still land *somewhere*
-            // in the target row.
-            probe--;
+            int rowStart = targetRow * Columns;
+            if (rowStart >= _items.Count) return;
+            int rowLastIndex = Mathf.Min(rowStart + Columns - 1, _items.Count - 1);
+            int targetIndex = Mathf.Min(rowStart + currentCol, rowLastIndex);
+            // Honour the same filter as linear MoveBy — fall back to walking toward the row start
+            // if the precise cell is blocked, so we still land *somewhere* in the target row.
+            for (int probe = targetIndex; probe >= rowStart && probe <= rowLastIndex; probe--)
+                if (IsNavigable(_items[probe]))
+                {
+                    if (probe == _index) return;
+                    SetIndex(probe, announce: true, interrupt: true, announceGroup: false);
+                    return;
+                }
         }
     }
 
