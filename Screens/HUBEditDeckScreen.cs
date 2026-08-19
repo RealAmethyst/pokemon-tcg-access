@@ -93,7 +93,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     // Library group (data): cursor into curCollection, navigated incrementally (the full list can
     // be hundreds of cards — we never materialize it, we step with GetNext/GetPreviousCard).
     private int _libIndex = -1;
-    private ArchetypeDBCards _libCurrent;
+    private ArchetypeDBCards? _libCurrent;
     private int _libCount;
     private bool _libAwaitingLoad;     // entered Library before its async filter query produced cards
     private bool _collectionCallbackRegistered;
@@ -236,7 +236,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         RebuildSections();
         // A child overlay (AddCardOverlay) closed, or a modal popped. The deck may have changed.
         RefreshDeck();
-        RefreshLibraryCount();
+        SyncLibCount();
         // During the tutorial the FTUE guidance (next Tick) re-announces the target — don't repeat
         // the section here, or the rapid coaching dialogue push/pop would spam it.
         if (FTUEHook.FtueIsRunning) return;
@@ -303,6 +303,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             RefreshDeck();
             _deckIndex = _deckCards.Length > 0 ? 0 : -1;
             _libIndex = -1;
+            _libCount = 0;
             _libAwaitingLoad = true;
             if (_section == Section.Deck && _deckCards.Length > 0) DeckFocus(0, announce: true);
         }
@@ -379,7 +380,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         }
 
         RefreshDeck();
-        RefreshLibraryCount();
+        SyncLibCount();
     }
 
     private List<Selectable> CategoryToggles() =>
@@ -575,7 +576,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
                 }
                 break;
             case Section.Library:
-                RefreshLibraryCount();
+                SyncLibCount();
                 if (_libCount > 0)
                 {
                     _libAwaitingLoad = false;
@@ -635,9 +636,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         }
         else
         {
-            if (_libCount == 0) return;
+            int live = SyncLibCount();
+            if (live == 0) return;
             int next = _libIndex + dir;
-            if (next < 0 || next >= _libCount) return;
+            if (next < 0 || next >= live) return;
             var kv = dir > 0
                 ? _controller!.CollectionDrawer.GetNextCard(_libCurrent, _libIndex)
                 : _controller!.CollectionDrawer.GetPreviousCard(_libCurrent, _libIndex);
@@ -657,15 +659,16 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
 
     private void LibFocus(int index, bool announce, bool interrupt = true)
     {
-        if (_libCount == 0) { _libIndex = -1; return; }
+        int live = SyncLibCount();
+        if (live == 0) { _libIndex = -1; return; }
         // Step to the requested index from index 0 (only used for the first focus; movement uses
         // GetNext/PreviousCard incrementally). GetNextCard(default, -1) yields curCollection[0].
         var kv = _controller!.CollectionDrawer.GetNextCard(default, -1);
         _libCurrent = kv.Key;
         _libIndex = kv.Value;
-        for (int i = 0; i < index && _libIndex < _libCount - 1; i++)
+        for (int i = 0; i < index && _libIndex < live - 1; i++)
         {
-            kv = _controller.CollectionDrawer.GetNextCard(_libCurrent, _libIndex);
+            kv = _controller.CollectionDrawer.GetNextCard(_libCurrent!, _libIndex);
             _libCurrent = kv.Key; _libIndex = kv.Value;
         }
         _lineIndex = -1;
@@ -681,10 +684,21 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         if (_deckIndex >= _deckCards.Length) _deckIndex = _deckCards.Length - 1;
     }
 
-    private void RefreshLibraryCount()
+    // The drawer rebuilds its collection inside a coroutine: PostProcessDataTableQuery swaps in an
+    // EMPTY list, fills it, then yields a frame before _onCollectionChanged reports the new total.
+    // Across that window our cached _libCount still holds the PREVIOUS filter's count, while the
+    // drawer's own GetNextCard indexes `(current + 1) % _curCollection.Count` — so authorizing a
+    // move against the cached count during a category / filter / search change divides by zero (or
+    // indexes out of range) inside the game's code, and the exception unwinds into the game rather
+    // than into us. Every index must be authorized against the LIVE count; this re-reads it and
+    // keeps the cache honest so the spoken "x of y" total matches what we just indexed.
+    private int SyncLibCount()
     {
-        _libCount = _controller?.CollectionDrawer != null ? _controller.CollectionDrawer.GetCurrentCollectionAmount() : 0;
+        _libCount = _controller?.CollectionDrawer != null
+            ? _controller.CollectionDrawer.GetCurrentCollectionAmount()
+            : 0;
         if (_libIndex >= _libCount) _libIndex = _libCount - 1;
+        return _libCount;
     }
 
     private ArchetypeDBCards? CurrentStack(Kind kind)
@@ -697,7 +711,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private void ReadCard(Kind kind, bool interrupt)
     {
         var st = CurrentStack(kind);
-        if (st is not { } stack || stack.IsDefault) return;
+        if (st is not { } stack) return;
         _lines.Clear();
         _lineIndex = -1;
         int idx = kind == Kind.Deck ? _deckIndex : _libIndex;
@@ -767,7 +781,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private void ReadLine(int dir)
     {
         var st = CurrentStack(_section == Section.Deck ? Kind.Deck : Kind.Library);
-        if (st is not { } stack || stack.IsDefault) return;
+        if (st is not { } stack) return;
         if (_lines.Count == 0)
         {
             var card = PreferredCard(stack);
@@ -790,7 +804,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     private void PickUp(Kind kind)
     {
         var st = CurrentStack(kind);
-        if (st is not { } stack || stack.IsDefault) return;
+        if (st is not { } stack) return;
 
         var action = kind == Kind.Deck ? CardEditorDrag.CardDropAction.Remove : CardEditorDrag.CardDropAction.Add;
 
@@ -1106,7 +1120,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         if (_controller?.CollectionDrawer == null) return false;
         int idx = _controller.CollectionDrawer.GetCardIndex(row.ArchetypeID);
         if (idx < 0) return false;
-        RefreshLibraryCount();
+        SyncLibCount();
         if (idx >= _libCount) return false;
         _section = Section.Library;
         Say(_libGroupName, interrupt: false);
@@ -1120,7 +1134,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
     {
         if (_holding) { Say("Place or cancel the held card first.", interrupt: true); return; }
         var st = CurrentStack(kind);
-        if (st is not { } stack || stack.IsDefault) return;
+        if (st is not { } stack) return;
         var card = PreferredCard(stack);
         if (card == null) return;
 

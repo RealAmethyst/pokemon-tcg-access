@@ -207,7 +207,7 @@ internal sealed class CardDexGridSection : INavSection
         else if (UnityEngine.Input.GetKeyDown(KeyCode.Return) || UnityEngine.Input.GetKeyDown(KeyCode.KeypadEnter))
         {
             var cards = Cards();
-            if (_index >= 0 && _index < cards.Count && !cards[_index].IsDefault) _openDetail(cards[_index]);
+            if (_index >= 0 && _index < cards.Count && cards[_index] != null) _openDetail(cards[_index]);
         }
     }
 

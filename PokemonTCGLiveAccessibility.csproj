@@ -129,6 +129,14 @@
       <HintPath>$(GameManagedDir)\SharedLogicUtils.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Aug 2026 client update split ItemData / CurrencyType / ItemCost / ItemGrant out of
+         SharedLogicUtils.dll into RainierItems.dll (same SharedLogicUtils.source.DataTypes
+         namespace). Without this reference those types fail to resolve and every method that
+         touches them dies with TypeLoadException at JIT time (silent labels, hard crashes). -->
+    <Reference Include="RainierItems">
+      <HintPath>$(GameManagedDir)\RainierItems.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="ClientNetworking">
       <HintPath>$(GameManagedDir)\ClientNetworking.dll</HintPath>
       <Private>false</Private>

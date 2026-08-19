@@ -545,7 +545,7 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     {
         if (card == null) return 0;
         var s = SelectedStack();
-        try { return s is { } st && !st.IsDefault ? st.TotalDeckQuantityForSpecificCard(card.CardID) : 0; } catch { return 0; }
+        try { return s is { } st ? st.TotalDeckQuantityForSpecificCard(card.CardID) : 0; } catch { return 0; }
     }
 
     // This version's copies owned (keyed by exact CardID) — the number that actually gates legality.
@@ -553,19 +553,19 @@ internal sealed class AddCardOverlayScreen : IScreenHandler
     {
         if (card == null) return 0;
         var s = SelectedStack();
-        try { return s is { } st && !st.IsDefault ? st.TotalOwnedQuantityForSpecificCard(card.CardID) : 0; } catch { return 0; }
+        try { return s is { } st ? st.TotalOwnedQuantityForSpecificCard(card.CardID) : 0; } catch { return 0; }
     }
 
     // Copies owned across every rarity of this card — used only to explain a not-owned version.
     private int TotalOwnedAllVersions()
     {
         var s = SelectedStack();
-        try { return s is { } st && !st.IsDefault ? st.TotalOwnedQuantity() : 0; } catch { return 0; }
+        try { return s is { } st ? st.TotalOwnedQuantity() : 0; } catch { return 0; }
     }
 
     private int TotalDeckQty()
     {
         var s = SelectedStack();
-        try { return s is { } st && !st.IsDefault ? st.TotalDeckQuantity() : 0; } catch { return 0; }
+        try { return s is { } st ? st.TotalDeckQuantity() : 0; } catch { return 0; }
     }
 }
