@@ -17,7 +17,6 @@ namespace PokemonTCGLiveAccessibility.Screens;
 internal sealed class HUBSettingsScreen : IScreenHandler
 {
     private static HUBSettingsScreen? _instance;
-    private static bool _selectorPatchFailureLogged;
 
     private readonly ScreenRouter _router;
     private readonly List<KeyboardNavigator> _groups = new();
@@ -83,20 +82,6 @@ internal sealed class HUBSettingsScreen : IScreenHandler
         }
         harmony.Patch(click, postfix: new HarmonyMethod(AccessTools.Method(typeof(HUBSettingsScreen), nameof(OnClickSettings_Postfix))));
 
-        // Aug-2026 Selector.Next / Previous mistakenly accept only SelectorModel<GameBoardAnimOption>,
-        // while the accessibility foil selector binds SelectorModel<CardFoilAnimOption>. Correct the
-        // game's public widget methods for that one model type so its real arrow Buttons remain usable.
-        var next = AccessTools.Method(typeof(Selector), nameof(Selector.Next));
-        var previous = AccessTools.Method(typeof(Selector), nameof(Selector.Previous));
-        if (next != null)
-            harmony.Patch(next, prefix: new HarmonyMethod(AccessTools.Method(typeof(HUBSettingsScreen), nameof(SelectorNext_Prefix))));
-        else
-            Log.Error("HUBSettingsScreen: could not resolve Selector.Next");
-        if (previous != null)
-            harmony.Patch(previous, prefix: new HarmonyMethod(AccessTools.Method(typeof(HUBSettingsScreen), nameof(SelectorPrevious_Prefix))));
-        else
-            Log.Error("HUBSettingsScreen: could not resolve Selector.Previous");
-
         Log.Info("HUBSettingsScreen installed");
     }
 
@@ -152,34 +137,6 @@ internal sealed class HUBSettingsScreen : IScreenHandler
         if (oldGroup != null && oldGroup.gameObject.activeInHierarchy) return oldGroup;
         if (newGroup != null && newGroup.gameObject.activeInHierarchy) return newGroup;
         return newGroup ?? oldGroup;
-    }
-
-    // Guarded Harmony prefixes for the game's mis-typed Selector methods. Non-foil selectors always
-    // fall through unchanged; failures also fall through and cannot escape into the game callback.
-    private static bool SelectorNext_Prefix(Selector __instance) => MoveCardFoilModel(__instance, next: true);
-    private static bool SelectorPrevious_Prefix(Selector __instance) => MoveCardFoilModel(__instance, next: false);
-
-    private static bool MoveCardFoilModel(Selector? selector, bool next)
-    {
-        try
-        {
-            if (selector == null) return true;
-            var model = ReadField<SelectorModel<CardFoilAnimOption>>(selector, "_model");
-            if (model == null) return true;
-
-            bool wrap = ReadValueField(selector, "wrap", fallback: true);
-            if (next) model.Next(wrap); else model.Previous(wrap);
-            return false;
-        }
-        catch (System.Exception ex)
-        {
-            if (!_selectorPatchFailureLogged)
-            {
-                _selectorPatchFailureLogged = true;
-                Log.Error($"HUBSettingsScreen: card-foil Selector correction failed: {ex.Message}");
-            }
-            return true;
-        }
     }
 
     public void OnEnter() => Rebuild(announce: true);
@@ -248,11 +205,6 @@ internal sealed class HUBSettingsScreen : IScreenHandler
                 _router.Speech.Say(LabelFor(_res), interrupt: true);
                 return;
             }
-            if (cur == (Selectable?)_foilFocus && MoveFoilSelector(right))
-            {
-                nav.RefocusCurrent(announce: true);
-                return;
-            }
             // A two-state setting reads like every other value on this screen, so it is driven like
             // one: Right turns it on, Left turns it off. Deterministic rather than a flip, so the
             // same key always produces the same result. Assigning isOn fires the game's own
@@ -282,8 +234,10 @@ internal sealed class HUBSettingsScreen : IScreenHandler
             }
             return;
         }
+        // The foil row is read-only (see FoilAnimationsLabel): swallow Enter / Space so its focus
+        // proxy can never fire the arrow Button behind it.
         if ((enter || space) && cur == (Selectable?)_foilFocus)
-            return; // Selector is operated by Left / Right; its focus proxy must not act as a Button.
+            return;
 
         // Enter flips a setting. KeyboardNavigator deliberately reserves checkbox toggling for Space
         // (the desktop convention for a form checkbox), but these rows are settings rather than form
@@ -332,42 +286,7 @@ internal sealed class HUBSettingsScreen : IScreenHandler
         if (LiveHierarchyChanged()) Rebuild(announce: true);
     }
 
-    private bool MoveFoilSelector(bool next)
-    {
-        if (_foilSelector == null) return false;
-        var button = next ? _foilRight : _foilLeft;
-        if (button == null || !button.isActiveAndEnabled || !button.IsInteractable()) return false;
 
-        try
-        {
-            // Current prefabs should bind the Button to Selector.Next / Previous. Some installed
-            // scene data still names the removed SelectNext / SelectPrevious methods; for that shape,
-            // call the corrected public Selector method first, then invoke the real Button so any
-            // other callbacks serialized on that widget still run on the new value.
-            string method = next ? nameof(Selector.Next) : nameof(Selector.Previous);
-            if (!HasPersistentCallback(button, _foilSelector, method))
-            {
-                if (next) _foilSelector.Next(); else _foilSelector.Previous();
-            }
-            button.onClick?.Invoke();
-            return true;
-        }
-        catch (System.Exception ex)
-        {
-            Log.Error($"HUBSettingsScreen: card-foil selector activation failed: {ex.Message}");
-            return false;
-        }
-    }
-
-    private static bool HasPersistentCallback(Button button, Object target, string method)
-    {
-        int count = button.onClick.GetPersistentEventCount();
-        for (int i = 0; i < count; i++)
-            if (button.onClick.GetPersistentTarget(i) == target &&
-                button.onClick.GetPersistentMethodName(i) == method)
-                return true;
-        return false;
-    }
 
     private void Rebuild(bool announce)
     {
@@ -919,6 +838,11 @@ internal sealed class HUBSettingsScreen : IScreenHandler
         return JoinLabel(RowName(_battleDescription), JoinLabel(TextOf(_battleValueLabel), TextOf(_battleDescription)));
     }
 
+    // Read-only. Selector.Next / Previous in this client only accept SelectorModel<GameBoardAnimOption>
+    // while this row binds SelectorModel<CardFoilAnimOption>, so the arrows either side of it do
+    // nothing for anyone — the setting is genuinely unchangeable in the shipped game. We report that
+    // rather than repairing it: the mod's job is to give the same access a sighted player has, not
+    // more. If a later client fixes the widget, delete this note and the trailing state below.
     private string FoilAnimationsLabel()
     {
         CardFoilAnimOption value;
@@ -929,11 +853,11 @@ internal sealed class HUBSettingsScreen : IScreenHandler
             else
                 value = ManagerSingleton<GameManager>.instance.Accessibility.CardFoilAnim.Value;
 
-            return JoinLabel(RowName(_foilDescription),
-                             JoinLabel(Loc(value.ToString()), Loc(CardFoilAnimSetting.GetDescription(value))));
+            return Unchangeable(JoinLabel(RowName(_foilDescription),
+                             JoinLabel(Loc(value.ToString()), Loc(CardFoilAnimSetting.GetDescription(value)))));
         }
         catch { }
-        return JoinLabel(RowName(_foilDescription), JoinLabel(FoilValueText(), TextOf(_foilDescription)));
+        return Unchangeable(JoinLabel(RowName(_foilDescription), JoinLabel(FoilValueText(), TextOf(_foilDescription))));
     }
 
     private static string TabLabel(Toggle toggle, PageDragTab tab)
@@ -994,6 +918,9 @@ internal sealed class HUBSettingsScreen : IScreenHandler
     // same as the Accessibility ones and localize with the client. Deliberately not "checked" /
     // "unchecked": these are settings switches rather than form checkboxes, and the game already
     // names their states — no reason to speak mod English over the client's own text.
+    private static string Unchangeable(string label)
+        => string.IsNullOrWhiteSpace(label) ? label : $"{label}, unavailable";
+
     private static string State(Toggle toggle) => Loc(BoolSettingBase.GetToggleLabel(toggle.isOn));
     private static bool Active(Selectable? selectable) => selectable != null && selectable.isActiveAndEnabled;
 
