@@ -712,6 +712,15 @@ internal sealed class KeyboardNavigator : INavSection
         _caretPrevText = string.Empty;
     }
 
+    // Release every listener this navigator attached to game objects. Right now that's only the
+    // focused input field's character-echo hook — which lives on the FIELD's UnityEvent, so it
+    // outlives the navigator. A handler that discards a navigator while a field is still focused
+    // (e.g. a group-stack screen doing _groups.Clear() to rebuild) must Detach it first, or the dead
+    // navigator is kept alive by the field and its OnEchoChanged fires alongside the new one — every
+    // typed character then speaks twice, three times, once per rebuild. Idempotent and safe to call
+    // when no field is wired.
+    public void Detach() => UnwireEcho();
+
     private void OnEchoChanged(string newText)
     {
         newText ??= string.Empty;
@@ -900,6 +909,13 @@ internal sealed class KeyboardNavigator : INavSection
             if (HasLetter(t.text)) return t.text;
         foreach (var t in s.GetComponentsInChildren<Text>(includeInactive: false))
             if (HasLetter(t.text)) return t.text;
+
+        // Still no worded label — an icon-only control. Before falling back to its prefab
+        // GameObject name, ask what the prefab wired its onClick to: for the handful of icon
+        // buttons we've traced in the decompiled source, the game method IS the meaning (the ✎
+        // beside a deck name calls Settings_BeginNameChange → "Rename deck"). See UiLabels.
+        var byAction = Util.UiLabels.ByAction(s);
+        if (byAction != null) return byAction;
 
         // No worded label — fall back to any non-empty text (e.g. a shop price "200", a count).
         // For a number-only control that text IS the meaningful label, so prefer it over the

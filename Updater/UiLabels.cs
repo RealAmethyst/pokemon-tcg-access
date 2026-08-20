@@ -12,4 +12,8 @@ internal static class UiLabels
     public static string? Friendly(string? goName) => null;
 
     public static string? Describe(Selectable s) => null;
+
+    // The real UiLabels names icon-only buttons by the game method their prefab onClick calls. The
+    // Updater's buttons all carry their own worded label, so there is nothing to map here.
+    public static string? ByAction(Selectable s) => null;
 }

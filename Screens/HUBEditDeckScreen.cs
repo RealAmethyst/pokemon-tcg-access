@@ -413,6 +413,7 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
             .Where(b => !toggleSet.Contains(b))
             .Cast<Selectable>().ToList();
         DiscoverExchangeButton(topButtons);
+        EnsureRenameButton(topButtons);
         topButtons.Sort((a, b) => ReadingOrder(a.transform).CompareTo(ReadingOrder(b.transform)));
         _topNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
         _topNav.SetItems(topButtons, TopLabel);
@@ -420,7 +421,10 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         // detection strands one cluster (only the first few were reachable). Force a flat Up/Down list
         // so every option is reachable in reading order. See [[feedback_auto_detect_axes]].
         _topNav.ForceFlatVertical();
-        Log.Info($"DeckEditor top: {topButtons.Count} options [{string.Join(", ", topButtons.Select(s => s.gameObject.name))}] exchange={(_exchangeButton != null ? "yes" : "no")}");
+        // Log each option with the game method its prefab onClick calls. Half the top bar is icon-only,
+        // where a GameObject name says nothing; the wired method names it exactly, and that's what a
+        // future rebuild needs to identify one that moved or disappeared.
+        Log.Info($"DeckEditor top: {topButtons.Count} options [{string.Join(", ", topButtons.Select(Describe))}] exchange={(_exchangeButton != null ? "yes" : "no")}");
 
         // Rebuilding drops the old navigator's cursor. If the player is standing in this section, put
         // them back on the SAME option (by identity — the new one is inserted in reading order, so its
@@ -480,6 +484,40 @@ internal sealed class HUBEditDeckScreen : IScreenHandler
         }
         catch { }
         return string.IsNullOrEmpty(cost) ? label : $"{label}, {cost} {Loc("currency_tc", "Credits")}";
+    }
+
+    // The ✎ beside the deck name — the editor's only route to renaming a deck. It's icon-only, so it
+    // can't be matched by text and its GameObject name is an art detail; match it by the game method
+    // its prefab onClick calls (HUBEditDeckController.Settings_BeginNameChange), which is real code we
+    // read. The generic top-bar sweep normally picks it up; this is the guarantee that it's there, and
+    // a named log line if it ever isn't — the alternative is a silently missing feature.
+    private void EnsureRenameButton(List<Selectable> topButtons)
+    {
+        if (_controller == null) return;
+        if (topButtons.Any(s => UiLabels.HasHandler(s as Button, RenameHandler))) return;
+
+        var rename = _controller.GetComponentsInChildren<Button>(includeInactive: true)
+            .FirstOrDefault(b => UiLabels.HasHandler(b, RenameHandler));
+        if (rename == null)
+        {
+            Log.Warn($"DeckEditor: no button wired to {RenameHandler} under the controller — renaming is unreachable from the editor");
+            return;
+        }
+        if (!rename.isActiveAndEnabled)
+        {
+            Log.Info($"DeckEditor: rename button '{rename.gameObject.name}' exists but is inactive — not surfaced");
+            return;
+        }
+        topButtons.Add(rename);
+        Log.Info($"DeckEditor: rename button '{rename.gameObject.name}' recovered — the top-bar sweep missed it");
+    }
+
+    private const string RenameHandler = "Settings_BeginNameChange";
+
+    private static string Describe(Selectable s)
+    {
+        var handlers = UiLabels.Handlers(s as Button);
+        return string.IsNullOrEmpty(handlers) ? s.gameObject.name : $"{s.gameObject.name}→{handlers}";
     }
 
     private string TopLabel(Selectable s)

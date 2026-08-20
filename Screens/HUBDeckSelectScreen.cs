@@ -39,6 +39,7 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
     private KeyboardNavigator? _tabsNav;
     private KeyboardNavigator? _detailNav;
     private Button? _setActiveBtn;    // the live SET ACTIVE button (only for a non-active valid deck), matched by identity for labeling
+    private Button? _renameBtn;       // the ✎ pencil (DeckPanel_L.editDeckNameButton); runtime-wired, so labelled by identity not by onClick
     private Button? _createButton;   // "CREATE A DECK", the deck grid's leftmost top item
 
     // Challenge-deck-selection mode: the deck screen reached from a friend battle request. The
@@ -287,6 +288,13 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
             var setBtn = sadbp != null ? ReadField<Button>(sadbp, "setActiveButton") : null;
             _setActiveBtn = setBtn != null && setBtn.isActiveAndEnabled ? setBtn : null;
             if (_setActiveBtn != null && !items.Contains(_setActiveBtn)) items.Add(_setActiveBtn);
+
+            // The ✎ rename pencil (DeckPanel_L.editDeckNameButton). It's an icon with its onClick added
+            // at runtime (OnEnable → AddListener(OpenDeckRenameMenu)), so UiLabels.ByAction — which reads
+            // only prefab-persistent onClick entries — can't see it. Grab it by identity to give it the
+            // same localized "Rename deck" label the editor's pencil gets. The generic scan already
+            // includes it when active; this just records the reference for DetailLabel.
+            _renameBtn = ReadField<Button>(panel, "editDeckNameButton");
         }
         items = items.OrderBy(s => ReadingOrder(s.transform)).ToList();
         _detailNav = new KeyboardNavigator(_router.Speech) { AllowTab = false, GroupName = "Deck options" };
@@ -307,6 +315,9 @@ internal sealed class HUBDeckSelectScreen : IScreenHandler
             if (!baseLabel.Any(char.IsLetter) || baseLabel.Equals("button", StringComparison.OrdinalIgnoreCase))
                 return "Set active";
         }
+        // The runtime-wired rename pencil — name it with the game's own rename label (English fallback).
+        if (_renameBtn != null && s == _renameBtn)
+            return Util.UiLabels.Localize("ui_deck_options_rename", "Rename deck");
         return KeyboardNavigator.DefaultLabel(s);
     }
 

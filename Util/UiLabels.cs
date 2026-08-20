@@ -27,6 +27,84 @@ internal static class UiLabels
     public static string? Friendly(string? goName)
         => goName != null && Names.TryGetValue(goName, out var n) ? n : null;
 
+    // Icon-only controls named by the game method their onClick is wired to in the prefab. The
+    // GameObject name of an icon button is a prefab detail that changes between art passes; the
+    // method its UnityEvent calls is real game code we've read, so it's the stabler anchor — and it
+    // says exactly what the button does. Only consulted when the control carries no worded text of
+    // its own (KeyboardNavigator.ResolveBaseLabel), so a labelled button always keeps the game's own
+    // localized text.
+    //
+    // Each entry pairs the game's OWN localization id for that control with an English fallback, so
+    // the spoken label follows the client language rather than being baked in ([[feedback-no-hardcoded-text]]).
+    // ONLY methods the prefab wires PERSISTENTLY belong here — GetPersistentMethodName sees prefab
+    // (inspector) onClick entries, never runtime AddListener ones. The DECKS-panel pencil is wired at
+    // runtime (DeckPanel_L.OnEnable → AddListener(OpenDeckRenameMenu)), so it is invisible to this map
+    // and is labelled by identity in HUBDeckSelectScreen instead.
+    private static readonly Dictionary<string, (string loc, string english)> Actions = new()
+    {
+        // The ✎ pencil beside the deck name in the deck EDITOR (prefab-wired to Settings_BeginNameChange).
+        { "Settings_BeginNameChange", ("ui_deck_options_rename", "Rename deck") },
+        // The ⋮ that opens the deck-options menu from inside the editor.
+        { "OpenLandscapeDeckOptions", ("deck_options", "Deck options") },
+    };
+
+    public static string? ByAction(Selectable s)
+    {
+        if (s is not Button b) return null;
+        try
+        {
+            int n = b.onClick.GetPersistentEventCount();
+            for (int i = 0; i < n; i++)
+                if (Actions.TryGetValue(b.onClick.GetPersistentMethodName(i) ?? "", out var a)) return Localize(a.loc, a.english);
+        }
+        catch { }
+        return null;
+    }
+
+    // Resolve a game loc id, falling back to English when the id is missing from the loaded table
+    // (GetString hands back a "(Missing)…" marker for an unknown key, which must not be spoken).
+    public static string Localize(string locId, string english)
+    {
+        try
+        {
+            var s = Hooks.LocalizationHook.Get(locId);
+            if (!string.IsNullOrWhiteSpace(s) && !s!.Contains("(Missing)")) return s!;
+        }
+        catch { }
+        return english;
+    }
+
+    // Is this button wired, in the prefab, to a particular game method? The stable way to identify an
+    // icon-only control: its GameObject name is art, the method it calls is game code we've read.
+    public static bool HasHandler(Button? b, string method)
+    {
+        if (b == null) return false;
+        try
+        {
+            int n = b.onClick.GetPersistentEventCount();
+            for (int i = 0; i < n; i++)
+                if (b.onClick.GetPersistentMethodName(i) == method) return true;
+        }
+        catch { }
+        return false;
+    }
+
+    // The persistent (prefab-wired) onClick method names of a button, for diagnostics. An icon-only
+    // control tells us nothing by its GameObject name; this says what it actually does.
+    public static string Handlers(Button? b)
+    {
+        if (b == null) return "";
+        try
+        {
+            int n = b.onClick.GetPersistentEventCount();
+            if (n == 0) return "";
+            var parts = new string[n];
+            for (int i = 0; i < n; i++) parts[i] = b.onClick.GetPersistentMethodName(i) ?? "?";
+            return string.Join("+", parts);
+        }
+        catch { return ""; }
+    }
+
     // HUB top-strip tab label with the game's selected state appended ("HOME, selected"). The
     // selected tab is the one whose PersistentNavButtonGroup animator is in its "On" state — the
     // same signal the game uses to highlight the current tab. Other strips already say
