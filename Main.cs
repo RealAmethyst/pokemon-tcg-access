@@ -145,6 +145,21 @@ public class Mod : MelonMod
 
     public override void OnApplicationQuit()
     {
+        // Un-subclass the window BEFORE anything else: while our WndProc is installed, every message
+        // Windows sends during teardown runs managed code, and the managed domain is about to go away.
+        // Leaving it installed crashed the game on every exit (see WindowFix.Shutdown).
+        Cleanup();
+    }
+
+    // Second chance. MelonLoader calls this when a melon unregisters and again in its definite-quit
+    // phase — paths that do NOT necessarily go through OnApplicationQuit. Both steps are idempotent
+    // (WindowFix.Shutdown no-ops once restored; SpeechEngine.Shutdown clears its handles), so running
+    // the cleanup twice is free, while missing it once costs a crash on exit.
+    public override void OnDeinitializeMelon() => Cleanup();
+
+    private void Cleanup()
+    {
+        _windowFix?.Shutdown();
         _speech?.Shutdown();
     }
 }

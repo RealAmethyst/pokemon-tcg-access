@@ -17,10 +17,12 @@ internal sealed class WindowFix
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
-    // Pinned via static reference so the GC doesn't collect it while
-    // Windows is calling back into native code.
+    // Rooted via static reference so the GC doesn't collect it while Windows is calling back into
+    // native code. Once set it is NEVER cleared: the root must outlive any in-flight callback, and
+    // holding it for the life of the process costs nothing.
     private static WndProcDelegate? _wndProcDelegate;
     private static IntPtr _originalWndProc = IntPtr.Zero;
+    private static IntPtr _ourWndProcPtr = IntPtr.Zero;   // what we installed, to prove it's still ours
     private static int _getObjectLogCount;
 
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -171,8 +173,68 @@ internal sealed class WindowFix
         Log.Info($"WindowFix: Unity WM_GETOBJECT response — client=0x{clientResp.ToInt64():X16} window=0x{windowResp.ToInt64():X16}");
     }
 
+    // Put Unity's own WndProc back, so the window stops pointing at managed code.
+    //
+    // MUST run before the game exits. SetWindowLongPtr hands Windows a raw function pointer to a
+    // managed delegate; keeping the delegate in a static field stops the GC collecting it, but it does
+    // NOT survive the Mono domain being torn down at shutdown. Alt+F4 then had Windows dispatch the
+    // teardown messages (WM_DESTROY / WM_NCDESTROY) into a trampoline whose managed target no longer
+    // existed — an access violation inside a kernel-to-user callback (0xc0000005 + 0xc000041d, faulting
+    // module "unknown" because the trampoline is JIT memory, not a DLL). The process died on every exit,
+    // and Windows then relaunched the crashed game, which crashed again: the reopening loop.
+    // Safe to call repeatedly (OnApplicationQuit and OnDeinitializeMelon both call it). Every exit path
+    // logs a distinct named reason — a silent return here would cost a debugging round trip on the one
+    // bug class that kills the process.
+    public void Shutdown()
+    {
+        if (!_subclassed)
+        {
+            Log.Info("WindowFix: shutdown — no subclass installed, nothing to restore");
+            return;
+        }
+
+        // Window already gone: WM_DESTROY/WM_NCDESTROY have been delivered and nothing can call our
+        // proc again, so there is nothing left to undo.
+        if (_gameHwnd == IntPtr.Zero || !IsWindow(_gameHwnd))
+        {
+            Log.Info($"WindowFix: shutdown — window already destroyed (hwnd=0x{_gameHwnd.ToInt64():X}), subclass moot");
+            _subclassed = false;
+            return;
+        }
+
+        // Only restore if OURS is still the installed proc. If something subclassed on top of us,
+        // writing the original back would cut that other handler out of the chain.
+        var current = GetWindowLongPtr(_gameHwnd, GWLP_WNDPROC);
+        if (current != _ourWndProcPtr)
+        {
+            Log.Warn($"WindowFix: shutdown — WndProc is no longer ours (current=0x{current.ToInt64():X16} ours=0x{_ourWndProcPtr.ToInt64():X16}); leaving the chain alone");
+            _subclassed = false;
+            return;
+        }
+
+        var prev = SetWindowLongPtr(_gameHwnd, GWLP_WNDPROC, _originalWndProc);
+        if (prev == IntPtr.Zero)
+        {
+            // Restore FAILED — the window still points at our managed trampoline. Keep every piece of
+            // state (including _subclassed) so the next cleanup call can retry; releasing it here is
+            // exactly what would re-create the shutdown crash.
+            Log.Error($"WindowFix: FAILED to restore the original WndProc (win32 error {Marshal.GetLastWin32Error()}) — state kept so deinitialize can retry");
+            return;
+        }
+
+        _subclassed = false;
+        // _originalWndProc and _wndProcDelegate are deliberately NOT cleared. The delegate stays rooted
+        // for the life of the process (it costs nothing) so an in-flight call from another thread can
+        // never land on a collected target, and keeping the original pointer means such a call still
+        // chains into Unity's real handler rather than falling back to DefWindowProc.
+        Log.Info("WindowFix: WndProc subclass removed — Unity's original restored for shutdown");
+    }
+
     private static IntPtr OurWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // Defensive: if we've already torn the subclass down, never call through a null original.
+        if (_originalWndProc == IntPtr.Zero) return DefWindowProc(hWnd, msg, wParam, lParam);
+
         if (msg == WM_GETOBJECT)
         {
             // Bypass Unity's handler — let DefWindowProc provide the standard
@@ -192,6 +254,7 @@ internal sealed class WindowFix
         _wndProcDelegate = OurWndProc;
         var newPtr = Marshal.GetFunctionPointerForDelegate(_wndProcDelegate);
         _originalWndProc = SetWindowLongPtr(hwnd, GWLP_WNDPROC, newPtr);
+        _ourWndProcPtr = newPtr;
         Log.Info($"WindowFix: WndProc subclass installed. Original=0x{_originalWndProc.ToInt64():X16} New=0x{newPtr.ToInt64():X16}");
     }
 }

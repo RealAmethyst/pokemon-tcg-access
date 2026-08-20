@@ -49,6 +49,18 @@ public class UpdaterMod : MelonMod
 
     public override void OnApplicationQuit()
     {
+        // Same order as the main mod: drop the WndProc subclass before the managed domain goes away,
+        // or Windows dispatches teardown messages into dead managed code and the process crashes on
+        // exit. See WindowFix.Shutdown.
+        Cleanup();
+    }
+
+    // Second chance for the unregister / definite-quit paths that skip OnApplicationQuit. Idempotent.
+    public override void OnDeinitializeMelon() => Cleanup();
+
+    private void Cleanup()
+    {
+        _windowFix?.Shutdown();
         _speech?.Shutdown();
     }
 }
