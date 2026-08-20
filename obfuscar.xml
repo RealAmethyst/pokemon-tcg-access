@@ -1,0 +1,32 @@
+<?xml version='1.0'?>
+<!-- Release-only symbol renaming for DISTRIBUTION builds. Never runs on a plain `dotnet build`;
+     the MSBuild target that invokes this is gated on -p:Obfuscate=true, so the dev/test build
+     stays clean and its logs stay readable. Renames types, methods and fields to gibberish;
+     PRESERVES every method the game reflects on by name (Harmony patches follow the
+     _Postfix/_Prefix/_Finalizer/_Transpiler convention — see the SkipMethod rx below), the
+     MelonMod entry's external overrides (auto), and P/Invoke entry points (EntryPoint strings are
+     untouched by renaming). Verified safe: the mod never string-reflects its OWN types/fields.
+     A fail-closed check (build/verify-obfuscation.ps1) asserts no reflected method got renamed. -->
+<Obfuscator>
+  <Var name="InPath" value="bin\Release" />
+  <!-- Obfuscate into a STAGING dir. The build verifies here first and only publishes to
+       bin\Obfuscated on success, so a failed verify never leaves a broken DLL where the packager looks. -->
+  <Var name="OutPath" value="bin\ObfuscatedStaging" />
+  <Var name="KeepPublicApi" value="false" />
+  <Var name="HidePrivateApi" value="true" />
+  <Var name="RenameProperties" value="false" />
+  <Var name="RenameEvents" value="false" />
+  <Var name="RenameFields" value="true" />
+  <Var name="ReuseNames" value="true" />
+  <Var name="UseUnicodeNames" value="false" />
+  <Var name="SuppressIldasm" value="true" />
+  <!-- Reference assemblies the mod binds to, so Obfuscar can walk the inheritance graph. Uses the
+       ASCII junction (stable dev path). MelonLoader/0Harmony live in MelonLoader\net472. -->
+  <AssemblySearchPath path="C:\PokemonTCGLive\MelonLoader\net472" />
+  <AssemblySearchPath path="C:\PokemonTCGLive\Pokemon TCG Live_Data\Managed" />
+  <Module file="$(InPath)\PokemonTCGLiveAccessibility.dll">
+    <!-- Never rename a Harmony patch method: the game-side patch is installed by this exact name
+         (nameof(...) baked at compile time), so a rename makes the patch silently never apply. -->
+    <SkipMethod rx="_Postfix$|_Prefix$|_Finalizer$|_Transpiler$" />
+  </Module>
+</Obfuscator>

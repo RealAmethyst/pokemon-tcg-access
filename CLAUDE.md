@@ -115,12 +115,26 @@ dotnet build -c Release
 ```
 Output: `bin\Release\PokemonTCGLiveAccessibility.dll`.
 
-### Deploy (one-shot)
+### Deploy — the PROTECTED build is the default (Amethyst, 2026-08-20: "we stick to that from now on")
+Build protected, then deploy `bin\Obfuscated` (NOT `bin\Release`):
 ```powershell
-Copy-Item bin\Release\PokemonTCGLiveAccessibility.dll `
+dotnet build -c Release -p:Obfuscate=true
+Copy-Item bin\Obfuscated\PokemonTCGLiveAccessibility.dll `
   "C:\PokemonTCGLive\Mods\PokemonTCGLiveAccessibility.dll" -Force
 ```
 Game must be closed (Windows holds a file lock while loaded).
+
+**Always archive the build's `Mapping.txt` with it** — each protected build regenerates it, and it is
+the only key that turns an obfuscated crash trace back into real names. Keep a copy per deployed
+build under `..\research\protected-builds\<date_time>\` (the DLL plus its Mapping.txt).
+
+Obfuscar does symbol renaming **and string hiding** (its default): literals move into a generated
+decoder, so log text still prints correctly at runtime but is not readable inside the DLL. Attribute
+metadata is untouched, so `[MelonInfo]`, `[MelonGame]` and the P/Invoke `EntryPoint` names survive.
+
+Debugging fallback: when a bug needs readable logs/stack traces, deploy the clean build instead
+(`dotnet build -c Release`, copy from `bin\Release`), reproduce, then go back to the protected one.
+See [[project-build-obfuscation]].
 
 ### First-time install (already done)
 1. MelonLoader 0.7+ installed into the game folder via official installer.

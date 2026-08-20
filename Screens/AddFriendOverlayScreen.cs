@@ -55,11 +55,11 @@ internal sealed class AddFriendOverlayScreen : IScreenHandler
             Log.Error("AddFriendOverlayScreen: could not resolve HUBProfileScreenController.OnActivate");
             return;
         }
-        harmony.Patch(activate, postfix: new HarmonyMethod(AccessTools.Method(typeof(AddFriendOverlayScreen), nameof(ProfileActivated))));
+        harmony.Patch(activate, postfix: new HarmonyMethod(AccessTools.Method(typeof(AddFriendOverlayScreen), nameof(ProfileActivated_Postfix))));
         Log.Info("AddFriendOverlayScreen installed");
     }
 
-    private static void ProfileActivated(HUBProfileScreenController __instance)
+    private static void ProfileActivated_Postfix(HUBProfileScreenController __instance)
     {
         if (_instance == null) return;
         var hub = ReadField<FriendsHUBScreenController>(__instance, "friendsHubScreenController");

@@ -76,18 +76,18 @@ internal sealed class FriendsPanelScreen : IScreenHandler
             Log.Error("FriendsPanelScreen: could not resolve HUBProfileScreenController.OnActivate");
             return;
         }
-        harmony.Patch(activate, postfix: new HarmonyMethod(AccessTools.Method(typeof(FriendsPanelScreen), nameof(ProfileActivated))));
+        harmony.Patch(activate, postfix: new HarmonyMethod(AccessTools.Method(typeof(FriendsPanelScreen), nameof(ProfileActivated_Postfix))));
 
         var deactivate = AccessTools.Method(typeof(HUBProfileScreenController), "OnDeactivate");
         if (deactivate != null)
-            harmony.Patch(deactivate, postfix: new HarmonyMethod(AccessTools.Method(typeof(FriendsPanelScreen), nameof(ProfileDeactivated))));
+            harmony.Patch(deactivate, postfix: new HarmonyMethod(AccessTools.Method(typeof(FriendsPanelScreen), nameof(ProfileDeactivated_Postfix))));
 
         Log.Info("FriendsPanelScreen installed");
     }
 
     // Capture the friends controller + panel root whenever the Profile screen activates. The panel
     // itself opens later (FRIENDS button / auto-open); Poll() catches that via geometry.
-    private static void ProfileActivated(HUBProfileScreenController __instance)
+    private static void ProfileActivated_Postfix(HUBProfileScreenController __instance)
     {
         if (_instance == null) return;
         _instance._profile = __instance;
@@ -96,7 +96,7 @@ internal sealed class FriendsPanelScreen : IScreenHandler
         _instance._sawClosed = false;
     }
 
-    private static void ProfileDeactivated(HUBProfileScreenController __instance)
+    private static void ProfileDeactivated_Postfix(HUBProfileScreenController __instance)
     {
         if (_instance == null || _instance._profile != __instance) return;
         if (_instance._active) { _instance._active = false; _instance._router.Deactivate(_instance); }
