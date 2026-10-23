@@ -8,7 +8,7 @@ using PokemonTCGLiveAccessibility.Util;
     PokemonTCGLiveAccessibility.BuildInfo.Author)]
 // The standalone updater's app.info reads `pokemon` / `Updater` (verified
 // Updater\<ver>\Updater_Data\app.info) — must match exactly or MelonLoader rejects the mod as
-// incompatible, same rule as the main game (CLAUDE.md gotcha #2).
+// incompatible, same rule as the main game's MelonGame attribute.
 [assembly: MelonGame("pokemon", "Updater")]
 
 namespace PokemonTCGLiveAccessibility;

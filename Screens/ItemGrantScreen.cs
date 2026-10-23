@@ -346,7 +346,7 @@ internal sealed class ItemGrantScreen : IScreenHandler
 
     // The sealed-pack screen, spoken as it reads: "Mega Evolution—Pitch Black Booster Pack, 10 cards.
     // Packs left: 3." Title and packs-left are the game's own texts (no invented "Opening" — the
-    // screen doesn't say it, and nothing has opened yet; Amethyst 2026-07-23); the card count is the
+    // screen doesn't say it, and nothing has opened yet); the card count is the
     // one mod-added orientation fact.
     private string SealedPackText(ContentItemRewardController_Booster booster)
     {

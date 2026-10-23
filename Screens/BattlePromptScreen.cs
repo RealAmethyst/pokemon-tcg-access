@@ -1750,7 +1750,7 @@ internal sealed class BattlePromptScreen : IScreenHandler
 
     // "Dunsparce has 60 damage." — read from the selection state the server will receive, so what the
     // player hears is what actually got recorded, never an assumption. Just the target's total: the
-    // "N counters left to place" tally that followed it was cut on Amethyst's feedback (2026-07-23) —
+    // "N counters left to place" tally that followed it was cut as redundant —
     // the focused option that queues right after carries the flow.
     private string DamageDropSummary(string eid)
     {

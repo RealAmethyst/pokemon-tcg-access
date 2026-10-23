@@ -117,7 +117,7 @@ internal sealed class MatchResultScreen : IScreenHandler
 
     // Land on the SAFE button — the last one (the result screen's primary "move on": Continue / Close)
     // — and never on Add Friend. Focus first landing on Add Friend let an Enter fire a friend request
-    // at the opponent by accident (Amethyst's call). Add Friend stays reachable by arrowing up.
+    // at the opponent by accident. Add Friend stays reachable by arrowing up.
     private void FocusStatsDefault(bool interruptPrior)
     {
         if (_statsNav.Count == 0) return;

@@ -12,7 +12,7 @@ namespace PokemonTCGLiveAccessibility.Util;
 // player needs it to give to others (it's exactly what someone types into Add Friend). N speaks it
 // AND copies it to the OS clipboard, so it can be pasted straight into Discord/chat. Read from the
 // game's own NetworkProfile.GetPlayerName() (the same source the nameplate uses). Gated to where the
-// name is actually relevant — Profile and the friends flow — not every screen (Amethyst, 2026-06-20).
+// name is actually relevant — Profile and the friends flow — not every screen.
 // Skipped while a text field is focused so it never hijacks a typed "N" (e.g. a friend's name).
 internal static class PlayerNameReader
 {

@@ -147,48 +147,4 @@
     </Reference>
   </ItemGroup>
 
-  <!-- DISTRIBUTION-ONLY obfuscation. Opt-in: runs ONLY when built as `dotnet build -c Release
-       -p:Obfuscate=true`. A plain `dotnet build -c Release` (what we develop, deploy and test with)
-       is completely untouched, so dev builds and their logs stay readable. The protected DLL is
-       written to bin\Obfuscated\ (NOT bin\Release\), so the normal deploy never picks it up by
-       accident — the packaging step points at bin\Obfuscated\. Symbols: this same flag drops the
-       .pdb and optimizes, so nothing debuggable ships. See obfuscar.xml and build\verify-obfuscation.ps1.
-       Needs the Obfuscar global tool once (install command in obfuscar.xml / the recommendations doc). -->
-  <PropertyGroup Condition="'$(Obfuscate)' == 'true' and '$(Configuration)' == 'Release'">
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
-    <Optimize>true</Optimize>
-  </PropertyGroup>
-
-  <!-- Clear the shipping + staging folders BEFORE the compiler runs, so a compile failure (which skips
-       the AfterTargets publish step below) can never leave a stale protected DLL in bin\Obfuscated for
-       the packager to grab. Hooks CoreCompile, not Build: Build's compile DEPENDENCY runs before a
-       BeforeTargets="Build" hook, so that fired too late (proven). A protected artifact therefore only
-       ever exists after a fully successful build. -->
-  <Target Name="ProtectedBuildClean" BeforeTargets="CoreCompile"
-          Condition="'$(Obfuscate)' == 'true' and '$(Configuration)' == 'Release'">
-    <RemoveDir Directories="$(MSBuildProjectDirectory)\bin\Obfuscated;$(MSBuildProjectDirectory)\bin\ObfuscatedStaging" />
-  </Target>
-
-  <Target Name="ObfuscateRelease" AfterTargets="Build"
-          Condition="'$(Obfuscate)' == 'true' and '$(Configuration)' == 'Release'">
-    <PropertyGroup>
-      <_ObfStage>$(MSBuildProjectDirectory)\bin\ObfuscatedStaging</_ObfStage>
-      <_ObfOut>$(MSBuildProjectDirectory)\bin\Obfuscated</_ObfOut>
-    </PropertyGroup>
-    <!-- Also clear here: on an up-to-date incremental build CoreCompile is skipped, so the pre-compile
-         clean above doesn't fire, but this target still does - always start from an empty slate. -->
-    <RemoveDir Directories="$(_ObfOut);$(_ObfStage)" />
-    <MakeDir Directories="$(_ObfStage)" />
-    <Message Importance="high" Text="Obfuscating distribution build (symbol renaming, types/methods/fields) into staging..." />
-    <Exec Command="obfuscar.console &quot;obfuscar.xml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)" />
-    <!-- Fail closed: verify the STAGING output. A non-zero exit fails the build here, so the publish
-         step below never runs and bin\Obfuscated stays empty. -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;build\verify-obfuscation.ps1&quot; &quot;$(_ObfStage)&quot;" WorkingDirectory="$(MSBuildProjectDirectory)" />
-    <!-- Verified good: publish the DLL + its de-obfuscation mapping to the shipping location. -->
-    <MakeDir Directories="$(_ObfOut)" />
-    <Copy SourceFiles="$(_ObfStage)\PokemonTCGLiveAccessibility.dll;$(_ObfStage)\Mapping.txt" DestinationFolder="$(_ObfOut)" />
-    <Message Importance="high" Text="Protected DLL ready: $(_ObfOut)\PokemonTCGLiveAccessibility.dll (keep its Mapping.txt to de-obfuscate crash logs)" />
-  </Target>
-
 </Project>

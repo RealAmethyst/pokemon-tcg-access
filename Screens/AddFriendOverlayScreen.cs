@@ -21,7 +21,7 @@ namespace PokemonTCGLiveAccessibility.Screens;
 // UnityEvent, so OverlayScreenGroup.OnActivate is never called. So we drive it off the controller's
 // PUBLIC events: `OnOpenAddFriend` opens, the overlay's own `OnClose` closes (activeInHierarchy backstop).
 //
-// Nav model (Amethyst, 2026-06-20): two groups — the text FIELD on its own (arrows are its caret), and
+// Nav model: two groups — the text FIELD on its own (arrows are its caret), and
 // the BUTTONS together (clear / send / back, navigated by arrows). TAB switches between the two groups;
 // it does NOT step through each control. See [[feedback-arrows-over-tab]].
 internal sealed class AddFriendOverlayScreen : IScreenHandler
